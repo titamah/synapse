@@ -1,50 +1,57 @@
-# BOLT
+# Synapse
 
-Bolt is an open-source platform originally designed for Boston Blerds, created for building and operating online communities, combining moderation tools, engagement systems, and analytics with a strong emphasis on consent, security, and user experience.
+Synapse is an open-source platform originally designed for Boston Blerds, created for building and operating online communities, combining moderation tools, engagement systems, and analytics with a strong emphasis on consent, security, and user experience.
 
-## Setup
+**BB-Bot** is Synapse's Discord interface: the bot members interact with.
 
-### Prerequisites
+Current focus: the [GTA VI giveaway](docs/gta-giveaway-spec.md).
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed
+## Stack
 
-### Getting Started
+Node.js + TypeScript · discord.js · Postgres + Drizzle · Docker Compose
 
-1. **Clone the repository:**
+## Local development
+
+**Prerequisites:** [Docker Desktop](https://www.docker.com/products/docker-desktop/), Node 22+
+
+1. Clone and install:
    ```bash
-   git clone https://github.com/titamah/bb-bot.git
-   cd bb-bot
+   git clone https://github.com/titamah/synapse.git
+   cd synapse
+   npm install
    ```
-
-2. **Create your environment file:**
+2. Create your environment file and fill in the Discord and Postgres values:
    ```bash
    cp .env.example .env
    ```
-
-3. **Update `.env` with your own values:**
-   - `POSTGRES_USER` - PostgreSQL username (default: `postgres`)
-   - `POSTGRES_PASSWORD` - Your secure database password
-   - `POSTGRES_DB` - Database name (default: `example`)
-   - `SERVER_PORT` - Server port (default: `5000`)
-   - `NODE_ENV` - Environment mode (default: `development`)
-
-4. **Start the application:**
+3. Start the bot and database:
    ```bash
-   docker compose up
+   docker compose up --build
    ```
+   On boot the bot runs database migrations and registers its slash commands with your server.
 
-   The bot will be running on http://localhost:5000 (or the port specified in `SERVER_PORT`) and connected to a local PostgreSQL database.
+> Only one copy of the bot should run per Discord token. Stop your local bot before testing against the same server as production.
 
-5. **To stop the application:**
-   ```bash
-   docker compose down
-   ```
+### Database changes
 
-## Development
-
-Make changes to your code and restart with `docker compose up`. 
-
-To rebuild after changes to dependencies:
+Edit `src/db/schema.ts`, then generate a migration and commit it:
 ```bash
-docker compose up --build
+npm run db:generate
 ```
+Migrations in `drizzle/` are applied automatically on startup.
+
+## Production
+
+Runs on an Oracle Cloud Always Free VM (Ubuntu 24.04) with Docker Compose, from a clone of this repo at `~/synapse`. Secrets live only in `~/synapse/.env` on the server.
+
+**Deploy** (after merging to `main`):
+```bash
+ssh synapse "cd ~/synapse && git pull && docker compose up -d --build"
+```
+
+**Logs:**
+```bash
+ssh synapse "cd ~/synapse && docker compose logs bot --tail 50"
+```
+
+**Backups:** `scripts/backup.sh` runs nightly at 3 AM ET via cron and keeps 14 days of compressed dumps in `~/backups`.
