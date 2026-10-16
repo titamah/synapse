@@ -7,6 +7,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
 } from 'discord.js';
+import { env } from '../config/environment.js';
 import { IDS, followReminder } from './messages.js';
 import { getEntrantByDiscord, isClosed, submitEntry } from './service.js';
 
@@ -16,6 +17,16 @@ const CONTACT_ADMIN = "We couldn't save that username. Message an admin and we'l
 
 /** Opens the entry form for `/giveaway enter`, pre-filled if they've already entered. */
 export async function showEntryModal(interaction: ChatInputCommandInteraction) {
+  const channelName = env.GIVEAWAY_CHANNEL_NAME;
+  const channel = interaction.channel;
+  if (!channel || !('name' in channel) || channel.name !== channelName) {
+    const target = interaction.guild?.channels.cache.find(c => c.name === channelName);
+    await interaction.reply({
+      content: `Head over to ${target ? `<#${target.id}>` : `#${channelName}`} to enter!`,
+      flags: ephemeral,
+    });
+    return;
+  }
   if (isClosed()) {
     await interaction.reply({ content: CLOSED, flags: ephemeral });
     return;

@@ -9,6 +9,9 @@ const envSchema = z.object({
   // Members with a role of this name (case-insensitive) can use every slash command.
   ADMIN_ROLE_NAME: z.string().min(1).default('admin'),
 
+  // /giveaway enter only works in the channel with this name.
+  GIVEAWAY_CHANNEL_NAME: z.string().min(1).default('gta-giveaway'),
+
   DATABASE_URL: z.string().min(1, 'Database URL is required'),
 
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
