@@ -1,9 +1,10 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from "discord.js";
 import type { Command } from '../types/discord.js';
 
 export const ActiveGamesCommand: Command = {
     data: new SlashCommandBuilder()
     .setName('activegames')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .setDescription('See the top games other blerds in the server are playing.'),
 
     async execute(interaction: ChatInputCommandInteraction) {

@@ -1,9 +1,10 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from "discord.js";
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from "discord.js";
 import type { Command } from '../types/discord.js';
 
 export const PlayingCommand: Command = {
     data: new SlashCommandBuilder()
     .setName('playing')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .setDescription('See who is playing right now.')
     .addStringOption(option =>
         option.setName('game')

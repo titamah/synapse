@@ -1,5 +1,9 @@
 import 'discord.js';
-import { Collection, SlashCommandBuilder, ChatInputCommandInteraction, RESTPostAPIChatInputApplicationCommandsJSONBody } from 'discord.js';
+import type {
+  ChatInputCommandInteraction,
+  Collection,
+  RESTPostAPIChatInputApplicationCommandsJSONBody,
+} from 'discord.js';
 
 declare module 'discord.js' {
   interface Client {
@@ -8,8 +12,10 @@ declare module 'discord.js' {
 }
 
 export type Command = {
-    data: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder;
-    execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
+  /** Everyone can use it. Without this, the command is admin-only. */
+  public?: boolean;
+  data: { name: string; toJSON(): RESTPostAPIChatInputApplicationCommandsJSONBody };
+  execute: (interaction: ChatInputCommandInteraction) => Promise<void>;
 };
 
 export type CommandBody = RESTPostAPIChatInputApplicationCommandsJSONBody;

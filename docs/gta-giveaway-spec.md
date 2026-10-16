@@ -1,8 +1,8 @@
 # GTA VI Giveaway — BB-Bot Requirements
 
-**Status:** Draft v3 · **Owner:** Boston Blerds · **Launch:** Oct 19, 2026 · **Entries close:** Nov 20, 2026 @ 10:30 PM ET
+**Status:** Draft v4 · **Owner:** Boston Blerds · **Launch:** Oct 19, 2026 *(may be postponed until the Meta app is approved; see §6a)* · **Entries close:** Nov 20, 2026 @ 10:30 PM ET
 
-BB-Bot is the Discord-facing worker for Synapse. For this campaign its only job is to **capture, verify and export giveaway entries**. Everything else in the Synapse masterdoc (XP, moderation, activity) is out of scope.
+BB-Bot is the Discord-facing worker for Synapse. For this campaign its job is to **capture giveaway data into the database**. Admins view and download that data on **admin.bostonblerds.com**, not in Discord. Everything else in the Synapse masterdoc (XP, moderation, activity) is out of scope.
 
 ---
 
@@ -10,159 +10,142 @@ BB-Bot is the Discord-facing worker for Synapse. For this campaign its only job 
 
 | Action | Type | Entries | How it's captured | Verified by |
 |---|---|---|---|---|
-| Join Discord + post IG username in `#gta-giveaway` | **Required** | 1 | Bot: "Enter" button → form | Bot (automatic) |
-| Follow @BostonBlerds on IG | **Required** | — | Self-attested checkbox in form | Admin spot-checks **winner only** |
-| Comment on giveaway post + tag a friend | Bonus | +1 (max 1) | Bot pulls comments from the IG post (later: IG webhook) | Bot (comment must contain an `@tag`) |
-| Share giveaway post to IG Story + tag @BostonBlerds | Bonus | +1 (max 1) | Admin logs manually until Meta approval, then the IG webhook | Admin → bot |
-| Attend Retro Gaming Night, ticket scanned | Bonus | +1 (max 1) | Posh webhook supplies the IG username at RSVP; the scan confirms attendance | Posh check-in data |
+| Join Discord + submit IG username | **Required** | 1 | `/giveaway enter` → form | Bot (automatic) |
+| Follow @BostonBlerds on IG | **Required** | — | Reminder in the bot's reply | Admin checks the **winner only** |
+| Comment on giveaway post + tag a friend | Bonus | +1 (max 1) | Pulled from the IG post (later: IG webhook) | Bot (comment must contain an `@tag`) |
+| Share giveaway post to IG Story + tag @BostonBlerds | Bonus | +1 (max 1) | Admin records it on the admin site until Meta approval, then the IG webhook | Admin |
+| Attend Retro Gaming Night, ticket scanned | Bonus | +1 (max 1) | Posh event report CSV (**Tickets Scanned** + **Instagram** columns) | Posh |
 
-**Max entries per person: 4.** Every bonus is capped at 1. No eligibility restrictions (no age, location or staff limits). **1 winner** (prize: GTA VI, logistics coordinated after the draw).
+**Max entries per person: 4.** Every bonus is capped at 1. No eligibility restrictions (no age, location or staff limits). **1 winner** (prize: GTA VI).
 
-> **Instagram limits:** Instagram's API can't tell you whether a given user follows you, so follows are self-attested. Story-mention and comment *webhooks* need Meta approval (see §6a). Until we're approved, the bot pulls comments from our *own* post, which only needs standard access, and admins log Story shares by hand.
+> **Instagram limits:** Instagram's API can't tell you whether a given user follows you. Story-mention and comment *webhooks* need Meta approval (see §6a). Until we're approved, admins log Story shares by hand. The bot can also pull comments from our *own* post, which only needs standard access.
 
 ---
 
 ## 2. User flow (entrant)
 
-Entrants never type a slash command. They use the buttons on the pinned message.
+**Entrants see as little as possible.** The bot only ever tells them their username was captured or updated. They never see entry counts, bonuses or anyone else's entries.
 
-1. Sees IG announcement → joins Discord → goes to `#gta-giveaway`.
-2. The pinned bot message explains the rules. It has two buttons: **🎮 Enter Giveaway** and **📋 My Entries**.
-3. **Enter** opens a form:
-   - Instagram username (required)
-   - "I follow @BostonBlerds on Instagram" (required confirmation)
-4. The bot replies **privately**: "✅ Username captured! Don't forget to follow @BostonBlerds on Instagram". The reply also shows their entry count and how to earn bonuses. Nothing is posted publicly, because the bot can't confirm follows.
-5. **My Entries** replies privately with the person's entries and which bonuses they have.
-6. Pressing **Enter** again opens the form pre-filled, so the person can edit their IG username before the deadline. The old value stays in the audit log.
+1. Sees the IG announcement → joins Discord → goes to `#gta-giveaway`.
+2. Runs **`/giveaway enter`**, which opens a form with one field: **Instagram username**. Admins post and pin the rules in the channel themselves.
+3. The bot replies **privately**: "✅ Username captured! Don't forget to follow @BostonBlerds on Instagram!"
+4. Running it again opens the form pre-filled with their current username, so they can edit it. The reply is "✅ Username updated!". The old value is kept in the audit log.
 
 **Rules enforced by the bot**
-- One base entry per Discord account.
-- One Discord account per IG username. A second claim is rejected and flagged for admins.
-- IG usernames are cleaned up (strip `@`, lowercase, trim) and must match IG's format (letters, numbers, `.` and `_`, up to 30 characters).
+- One entry per Discord account.
+- One Discord account per IG username. If a second account claims the same username, the bot replies "message an admin" without saying why, and flags it in the audit log.
+- IG usernames are cleaned up (strip `@` and instagram.com URLs, lowercase, trim) and must match IG's format (letters, numbers, `.` and `_`, up to 30 characters).
 - No entries or changes after **Nov 20, 2026 10:30 PM America/New_York**.
-- An entrant must still be in the server at export time. Anyone who left is excluded and listed in the report.
+- An entrant must still be in the server at draw time.
 
 ---
 
 ## 3. Admin flow
 
-**Every slash command is admin-only.** That includes the existing `/playing`, `/activegames` and `/communitycode`. Two layers enforce it:
-1. Discord's default permission (`Manage Server`), which hides commands from everyone else.
-2. A check in the bot itself on every command against an allow-listed admin role. Server owners can override Discord's default in Integrations settings, so the bot's own check is the real gate.
+**There are no admin commands in Discord.** `/giveaway enter` is the only giveaway command, and it's public. It's limited to `#gta-giveaway` through Discord's own settings (Server Settings → Integrations → BB-BOT → `/giveaway` → Channels), not in code. The older `/playing`, `/activegames` and `/communitycode` stay admin-only (role `admin`).
 
-All admin replies are private.
+Recording bonuses (Story shares, IRL), disqualifying entries, viewing and downloading all happen on **admin.bostonblerds.com** (§4). Until that site exists, admins keep a list of Story shares (IG usernames) to enter there later.
 
-| Command | Purpose |
-|---|---|
-| `/giveaway setup channel:#gta-giveaway` | Posts and pins the rules message with its buttons |
-| `/giveaway lookup user:<@discord or ig name>` | Shows one person's entries and history |
-| `/giveaway sync-comments` | Pulls comments from the giveaway IG post and awards comment bonuses |
-| `/giveaway bonus ig_user:<name> type:<story\|comment\|irl>` | Awards a bonus by hand (Story shares until Meta approval) |
-| `/giveaway revoke ig_user:<name> type:<…> reason:<…>` | Removes an entry or bonus (spam, fake account, etc.) |
-| `/giveaway import-checkins file:<csv>` | Marks IRL attendance from the Posh check-in export |
-| `/giveaway stats` | Totals: entrants, bonuses by type, unmatched bonuses, flags |
-| `/giveaway export` | Returns the CSVs in §4 |
-
-**Bonuses for people who haven't entered yet:** a bonus can arrive for an IG username with no base entry. The bot stores it as *unmatched*, and it attaches automatically if that person enters before the deadline. Unmatched bonuses never count on their own.
+**Bonuses for people who haven't entered yet:** a bonus can be recorded for an IG username with no entry. It's stored as *unmatched* and attaches automatically if that person enters before the deadline. Unmatched bonuses never count on their own.
 
 ---
 
-## 3a. Posh integration (IRL bonus)
+## 3a. Posh (IRL bonus)
 
-Posh sends a webhook when someone RSVPs or buys a ticket (`type: "new_order"`). The payload includes:
-- `account_instagram`: the buyer's IG handle, if their Posh profile has one
-- `custom_fields[]`: we add an optional RSVP question: *"Entering our GTA VI giveaway? Drop your Instagram username."*
-- `event_id`, `order_number`, `items[]`, plus `cancelled` / `refunded`
+Posh's **Export Event Report** (Event → Settings → Export event report, delivered by email as a CSV) includes the columns we need: **Order Number**, **Tickets Scanned**, **Instagram** and **Custom Checkout Field**. There's no check-in timestamp, but we don't need one.
 
 **Flow**
-1. `POST /webhooks/posh/<secret>` receives the order. The bot takes the IG username from the custom field, or from `account_instagram` if the field is empty, and stores an **RSVP**. An RSVP is *not* a bonus yet.
-2. Cancelled or refunded orders remove the RSVP.
-3. **Attendance needs the ticket scan.** Posh's webhook has no check-in data (confirmed). After the event an admin exports Posh's check-in list and runs `/giveaway import-checkins`. Each RSVP whose `order_number` was scanned becomes a +1 IRL bonus.
-4. Fallback if the check-in export doesn't work: an admin at the door runs `/giveaway bonus type:irl`.
+1. Add an optional checkout question to the Retro Gaming Night RSVP: *"Entering our GTA VI giveaway? Drop your Instagram username."*
+2. After the event, export the report with those columns selected.
+3. Upload the CSV on the admin site. Every row with tickets scanned > 0 gets +1 IRL for its IG username. The custom field wins over the profile's Instagram field if they differ.
+4. Fallback: an admin records IRL bonuses by hand on the admin site.
 
-To confirm before Nov 20: the columns in Posh's check-in export.
+The Posh webhook (`new_order`) is **not needed**, because the export covers both the IG username and the scan.
 
 ---
 
-## 4. Outputs (for the spinner wheel)
+## 4. Admin site — admin.bostonblerds.com
 
-`/giveaway export` returns:
+A small web app that reads the same database.
+- **Auth:** "Sign in with Discord". Access is allowed only to members of the Boston Blerds server who have the `admin` role. This is the only gate.
+- **Entrants:** a searchable table with Discord username, IG username, each bonus, total entries, entered date, still-in-server status, and disqualified status.
+- **Audit log:** every action, with who did it and when.
+- **Downloads:**
+  - `wheel.csv`: one row **per entry**, so a person with 3 entries appears 3 times and the wheel is weighted. Columns: `discord_username, discord_id, ig_username, entry_type`
+  - `entrants.csv`: one row per person
+  - `audit.csv`
+- **Posh upload** (§3a).
+- **Edit:** record a bonus by hand (Story shares), disqualify or restore an entry. Every change is written to the audit log.
 
-- **`wheel.csv`**: one row **per entry**. A person with 3 entries appears 3 times, so the wheel is weighted correctly.
-  `discord_username, discord_id, ig_username, entry_type`
-- **`entrants.csv`**: one row per person.
-  `discord_username, discord_id, ig_username, base, comment, story, irl, total_entries, entered_at, in_server`
-- **`audit.csv`**: every action, with who, what, when, the source, and which admin did it.
+**Until the site exists,** the data is safe in Postgres and can be queried directly on the VM if needed.
 
 **Winner flow (in person, Nov 20):**
-1. Import check-ins → close → export `wheel.csv` → load it into the spinner app.
+1. Upload the Posh report → entries close → download `wheel.csv` → load it into the spinner app.
 2. **Disconnect the projector or screen.** Spin privately.
 3. Verify that the result follows @BostonBlerds on IG and is still in the Discord. If not, remove them and spin again privately.
 4. **Reconnect the screen** and do the public spin.
-5. The winner is contacted by **Discord DM** to coordinate getting their copy of GTA VI.
+5. Contact the winner by **Discord DM**. They have **12 hours to claim**. If they don't, draw again.
 
 > 📝 **Spinner app requirement (separate project, don't forget):** the app must support a private "verification spin" with the screen disconnected, then a repeat public spin. It must load `wheel.csv` (weighted, one row per entry). Decide how the public spin relates to the verified result before Nov 20.
 
 ---
 
-## 5. Data model (Postgres)
+## 5. Data model (Postgres, implemented in `src/db/schema.ts`)
 
 ```
-giveaways        id, slug ('gta6-2026'), channel_id, ig_media_id, posh_event_id, opens_at, closes_at
-entrants         id, giveaway_id, discord_id (unique per giveaway), discord_username,
-                 ig_username (unique per giveaway), follow_attested, created_at, updated_at
-entry_actions    id, giveaway_id, entrant_id (nullable = unmatched), ig_username,
-                 type (BASE|IG_COMMENT|IG_STORY|IRL), source (discord|ig_api|ig_webhook|admin|posh),
-                 source_ref (comment id / order number), revoked_at, revoked_reason,
-                 created_by, created_at
-                 UNIQUE (giveaway_id, ig_username, type)   -- enforces max 1 per bonus
-posh_orders      order_number (pk), event_id, ig_username, raw jsonb, cancelled, checked_in_at, received_at
-audit_log        id, actor, action, payload jsonb, created_at
+giveaways   id, slug ('gta6-2026'), channel_id, message_id, closes_at, created_at
+entrants    id, giveaway_id, discord_id, discord_username, ig_username,
+            revoked_at, revoked_by, revoked_reason, created_at, updated_at
+            UNIQUE (giveaway_id, discord_id) · UNIQUE (giveaway_id, ig_username)
+bonuses     id, giveaway_id, ig_username, type (COMMENT|STORY|IRL),
+            source (admin|ig_api|ig_webhook|posh), source_ref, created_by,
+            revoked_at, revoked_by, revoked_reason, created_at
+            UNIQUE (giveaway_id, ig_username, type)   -- max 1 per bonus
+audit_log   id, giveaway_id, actor_id, action, details jsonb, created_at
 ```
 
-This follows the Synapse Phase 1 pattern (Discord identity + audit log), so the data can move into Synapse later.
+Bonuses are linked by **IG username**, not by entrant. That's what lets unmatched bonuses attach later. It follows the Synapse Phase 1 pattern (Discord identity + audit log), so the data can move into Synapse later.
 
 ---
 
 ## 6. Infrastructure
 
-- **Host:** Oracle Cloud Always Free, **us-ashburn-1**, Ampere A1 VM (ARM), Ubuntu. Ashburn often runs out of A1 capacity. Fallbacks: retry in a different availability domain, or use the always-free AMD micro VM (1 GB RAM), which is enough for the bot plus Postgres.
-- **Runtime:** Docker Compose with `bot` (Discord + a small Express web server for webhooks) and `postgres`. No Redis yet; it comes back with activity aggregation.
-- **Public HTTPS:** the Posh and IG webhooks need a public HTTPS URL. Plan: **Cloudflare Tunnel** (`cloudflared` container) to `bot.bostonblerds.com`. The domain is already on Cloudflare, so the VM opens no inbound ports and Cloudflare handles HTTPS.
+- **Host:** Oracle Cloud Always Free, **us-ashburn-1**, Ampere A1 VM (ARM), Ubuntu. Ashburn often runs out of A1 capacity. Fallback: the always-free AMD micro VM (1 GB RAM), which is enough for the bot plus Postgres.
+- **Runtime:** Docker Compose with `bot` and `db` (Postgres 18). The admin site becomes a third container. No Redis yet.
+- **Public HTTPS:** **Cloudflare Tunnel** (`cloudflared` container) maps `admin.bostonblerds.com` (and later the webhook endpoints) to the VM. The domain is already on Cloudflare, so the VM opens no inbound ports.
 - **Backups:** nightly `pg_dump` on the VM, plus a copy off the VM.
-- **Secrets:** `.env` on the VM only, never committed: `DISCORD_TOKEN`, `CLIENT_ID`, `SERVER_ID`, `ADMIN_ROLE_NAME=admin`, `IG_ACCESS_TOKEN`, `IG_APP_SECRET`, `POSH_WEBHOOK_SECRET`, `POSTGRES_*`.
+- **Secrets:** `.env` on the VM only, never committed.
 
-## 6a. Meta app approval (runs in parallel)
+## 6a. Meta app approval (runs in parallel; may gate launch)
 
 Goal: receive `comments` and Story-mention webhooks automatically. Meta requires:
 - [ ] A Meta developer app using **Instagram API with Instagram Login**, connected to @BostonBlerds (Business account)
-- [ ] **Business Verification** for Boston Blerds (legal or business documents)
-- [ ] Public **Privacy Policy** and **Data Deletion** URLs
-- [ ] **App Review** for `instagram_business_manage_comments` and `instagram_business_manage_messages`, with a screencast showing how the app uses them
+- [ ] **Business Verification** for Boston Blerds
+- [ ] Public **Privacy Policy** and **Data Deletion** URLs (can be hosted on bostonblerds.com)
+- [ ] **App Review** for `instagram_business_manage_comments` and `instagram_business_manage_messages`, with a screencast
 - [ ] App switched to **Live** mode
 
-Until approval: the bot pulls comments with standard access, and admins log Story shares daily (**Stories expire after 24 hours**). Once approved, webhooks take over and admins only handle edge cases.
+**Launch decision:** the launch can either wait for approval or go ahead on Oct 19 with manual Story logging. If it waits, the campaign dates in this spec shift. Either way, the Discord side is ready.
 
 ---
 
 ## 7. Delivery plan
 
-| By | Deliverable |
+| Step | Deliverable |
 |---|---|
-| **Oct 18** | VM up; bot running 24/7; admin-only commands; Enter and My Entries buttons, form, DB; `lookup`, `stats`, `export`, `bonus`, `revoke` |
-| **Oct 19** | 🚀 Launch: `/giveaway setup` posts the pinned message. Submit the Meta app for review. |
-| Oct 26 | IG comment sync; HTTPS domain live |
-| Oct 29 | Posh webhook + RSVP question live, before the tournament announcement |
-| On Meta approval | Switch comments and Story shares to webhooks |
-| Nov 20 | Import check-ins → close → export → spin |
-| Stretch | **Admin web viewer**: a read-only page listing entrants, bonuses, flags and the audit log, with search and CSV download. It sits behind Discord login and is restricted to the admin role. |
+| **1. Now** | ✅ `/giveaway enter`, form, DB; older commands admin-only |
+| **2. Next** | Oracle VM up; bot + DB running 24/7; nightly backups |
+| 3 | Launch: pin the rules in `#gta-giveaway`. Start the Meta app and Business Verification. |
+| 4 | Cloudflare Tunnel + **admin.bostonblerds.com** with Discord login, entrants table, bonus/disqualify edits and CSV downloads |
+| 5 | Posh CSV upload on the admin site (before Nov 20) |
+| 6 | IG comment sync, then switch to webhooks on Meta approval |
+| Nov 20 | Upload Posh report → close → download `wheel.csv` → spin |
 
 ---
 
 ## 8. Open questions
 
-1. **Posh:** need a sample check-in export to map its columns.
-2. **Prize claim window:** how long does the winner have to reply to the Discord DM before a re-draw?
-3. **Story logging:** who logs Story shares day to day until Meta approval?
+1. **Launch date:** Oct 19 with manual Story logging, or wait for Meta approval?
+2. **Story logging:** who logs Story shares day to day until Meta approval?
 
-**Decided:** admin role = `admin` · no eligibility restrictions · 1 winner, contacted by Discord DM · every bonus max 1 · private confirmation only (no public feed) · domain `bostonblerds.com` on Cloudflare · repo renamed to `synapse` locally and on GitHub.
+**Decided:** admin role = `admin` · no eligibility restrictions · 1 winner, Discord DM, **12 hours to claim** · every bonus max 1 · entrants only see "captured/updated" · data viewed and downloaded on admin.bostonblerds.com behind Discord admin login · Posh via event-report CSV, no webhook · domain `bostonblerds.com` on Cloudflare · repo `titamah/synapse`.

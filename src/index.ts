@@ -1,103 +1,89 @@
-import 'dotenv/config';
-import { Client, Collection, EmbedBuilder, Events, GatewayIntentBits, Interaction } from 'discord.js';
-import type { Command } from './types/discord.js';
+import { Client, Collection, Events, GatewayIntentBits, MessageFlags, REST, Routes, type Interaction } from 'discord.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { env } from './config/environment.js';
+import { pool, runMigrations } from './db/client.js';
+import { handleGiveawayModal } from './giveaway/interactions.js';
+import { getGiveaway } from './giveaway/service.js';
+import { isAdmin } from './lib/permissions.js';
+import type { Command } from './types/discord.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-console.log('TOKEN loaded?', !!process.env.DISCORD_TOKEN);
-
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
+await runMigrations();
+await getGiveaway();
+console.log('Database ready');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildPresences, GatewayIntentBits.GuildMembers],
-}) as Client & { commands: Collection<string, Command> };
+});
 
 client.commands = new Collection();
 
 const commandsPath = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandsPath).filter(f => f.endsWith('.ts') || f.endsWith('.js'));
+const commandFiles = fs.readdirSync(commandsPath).filter(f => /\.(ts|js)$/.test(f) && !f.endsWith('.d.ts'));
 
 for (const file of commandFiles) {
-  const filePath = path.join(commandsPath, file);
-  const commandModule = await import(`file://${filePath}`);
-  const command: Command = Object.values(commandModule)[0] as Command;
-  
+  const commandModule = await import(`file://${path.join(commandsPath, file)}`);
+  const command = Object.values(commandModule)[0] as Command | undefined;
   if (command?.data) {
     client.commands.set(command.data.name, command);
     console.log(`Loaded command: ${command.data.name}`);
   }
 }
 
-client.on('interactionCreate', async (interaction: Interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const command = client.commands.get(interaction.commandName);
-
-  if (!command) {
-    console.error(`No command found for ${interaction.commandName}`);
-    return;
-  }
-
+client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   try {
-    await command.execute(interaction);
+    if (interaction.isChatInputCommand()) {
+      const command = client.commands.get(interaction.commandName);
+      if (!command) {
+        console.error(`No command found for ${interaction.commandName}`);
+        return;
+      }
+      // Every slash command is admin-only unless it's explicitly marked public.
+      if (!command.public && !isAdmin(interaction)) {
+        await interaction.reply({ content: '🔒 This command is for admins only.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+      await command.execute(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('giveaway:')) {
+      await handleGiveawayModal(interaction);
+    }
   } catch (err) {
     console.error(err);
-    
-    const errorMessage = err instanceof Error && err.message.includes('rate limit')
-      ? 'Slow down! Try again in a few seconds.'
-      : 'Something went wrong';
-      
+    if (!interaction.isRepliable()) return;
+
+    const content = 'Something went wrong. Try again in a moment.';
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({
-        content: errorMessage,
-        flags: 64
-      });
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => undefined);
     } else {
-      await interaction.reply({
-        content: errorMessage,
-        flags: 64
-      });
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch(() => undefined);
     }
   }
 });
 
+client.once(Events.ClientReady, async readyClient => {
+  console.log(`Logged in as ${readyClient.user.tag}`);
 
-client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-    if (!interaction.isStringSelectMenu()) return;
-  
-    if (interaction.customId === "example-select") {
-      const selected = interaction.values[0];
-
-      const embed = new EmbedBuilder()
-      .setTitle("Selection Received")
-      .setDescription(`You selected **${selected}**`)
-      .setColor(0x5865f2) // Discord blurple
-      .setFooter({ text: "BB-BOT" });
-  
-    await interaction.reply({
-      embeds: [embed],
-      ephemeral: false,
-      });
-    }
+  // Registering on every boot keeps Discord in sync with the code; guild commands update instantly.
+  const rest = new REST({ version: '10' }).setToken(env.DISCORD_TOKEN);
+  await rest.put(Routes.applicationGuildCommands(env.CLIENT_ID, env.SERVER_ID), {
+    body: client.commands.map(c => c.data.toJSON()),
   });
-
-  client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-    if (!interaction.isButton()) return;
-    if (interaction.customId !== "noop-button") return;
-  
-    await interaction.reply({
-      content: "✨ confetti ✨ (imagine it)",
-      ephemeral: true,
-    });
-  });
-
-client.once('ready', () => {
-  console.log(`Logged in as ${client.user?.tag}`);
+  console.log(`Registered ${client.commands.size} commands`);
 });
 
-client.login(TOKEN);
+async function shutdown(signal: string) {
+  console.log(`${signal} received, shutting down`);
+  await client.destroy();
+  await pool.end();
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+
+await client.login(env.DISCORD_TOKEN);
