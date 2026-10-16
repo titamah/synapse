@@ -6,9 +6,24 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    # Web server port, reachable only inside Docker's network (by the tunnel), never published on the VM.
+    expose:
+      - "3000"
     depends_on:
       db:
         condition: service_healthy
+
+  # Cloudflare Tunnel: connects out to Cloudflare so api.bostonblerds.com reaches the bot's web server
+  # without opening any ports. Only runs where COMPOSE_PROFILES=tunnel is set (the production .env).
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - bot
+    profiles: ["tunnel"]
 
   db:
     image: postgres:18

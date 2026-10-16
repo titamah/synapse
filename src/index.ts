@@ -8,12 +8,15 @@ import { handleGiveawayModal } from './giveaway/interactions.js';
 import { getGiveaway } from './giveaway/service.js';
 import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
+import { startWebServer } from './web/server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 await runMigrations();
 await getGiveaway();
 console.log('Database ready');
+
+const webServer = startWebServer();
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildPresences, GatewayIntentBits.GuildMembers],
@@ -79,6 +82,7 @@ client.once(Events.ClientReady, async readyClient => {
 
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
+  webServer.close();
   await client.destroy();
   await pool.end();
   process.exit(0);

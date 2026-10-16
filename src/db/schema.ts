@@ -1,4 +1,4 @@
-import { pgEnum, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { boolean, pgEnum, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
 export const giveaways = pgTable('giveaways', {
   id: serial('id').primaryKey(),
@@ -67,4 +67,21 @@ export const auditLog = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   t => [index('audit_log_giveaway_idx').on(t.giveawayId, t.createdAt)],
+);
+
+/**
+ * Every inbound webhook (Instagram, later Posh), stored raw before any
+ * processing so nothing is lost if handling code fails or doesn't exist yet.
+ */
+export const webhookEvents = pgTable(
+  'webhook_events',
+  {
+    id: serial('id').primaryKey(),
+    source: text('source').notNull(),
+    payload: jsonb('payload').notNull(),
+    signatureValid: boolean('signature_valid').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+  },
+  t => [index('webhook_events_unprocessed_idx').on(t.source, t.processedAt)],
 );
