@@ -2,7 +2,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { REST, Routes } from 'discord.js';
-import type { Command, CommandBody } from '../types/discord.d.ts';
+import type { Command, CommandBody } from '../src/types/discord.js';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);

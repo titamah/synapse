@@ -1,6 +1,6 @@
 import 'dotenv/config';
-import { Client, Collection, GatewayIntentBits, Interaction } from 'discord.js';
-import type { Command } from '../types/discord.js';
+import { Client, Collection, EmbedBuilder, Events, GatewayIntentBits, Interaction } from 'discord.js';
+import type { Command } from './types/discord.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -65,6 +65,36 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
   }
 });
+
+
+client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    if (!interaction.isStringSelectMenu()) return;
+  
+    if (interaction.customId === "example-select") {
+      const selected = interaction.values[0];
+
+      const embed = new EmbedBuilder()
+      .setTitle("Selection Received")
+      .setDescription(`You selected **${selected}**`)
+      .setColor(0x5865f2) // Discord blurple
+      .setFooter({ text: "BB-BOT" });
+  
+    await interaction.reply({
+      embeds: [embed],
+      ephemeral: false,
+      });
+    }
+  });
+
+  client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    if (!interaction.isButton()) return;
+    if (interaction.customId !== "noop-button") return;
+  
+    await interaction.reply({
+      content: "✨ confetti ✨ (imagine it)",
+      ephemeral: true,
+    });
+  });
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user?.tag}`);

@@ -35,4 +35,4 @@ COPY . .
 EXPOSE 5000
 
 # Run the application.
-CMD node index.js
+CMD dotenvx run -- node index.js
