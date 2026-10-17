@@ -24,6 +24,9 @@ const envSchema = z.object({
   // @BostonBlerds' long-lived access token (Meta dashboard → Generate access tokens). Expires after 60 days.
   IG_ACCESS_TOKEN: z.string().optional().transform(v => v || undefined),
 
+  // Shared secret for the admin dashboard (admin.bostonblerds.com) to call /admin/*. Any long random string.
+  ADMIN_API_KEY: z.string().min(32).optional().or(z.literal('').transform(() => undefined)),
+
   DATABASE_URL: z.string().min(1, 'Database URL is required'),
 
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

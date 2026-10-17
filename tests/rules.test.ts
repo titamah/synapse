@@ -31,3 +31,8 @@ test('weekly: same week again earns nothing', () => assert.equal(pick({ action: 
 test('weekly: next Monday counts', () => assert.equal(pick({ action: 'ig_story', at: at('2026-10-26T00:30:00-04:00') }, [{ ruleId: 9, at: at('2026-10-20T12:00:00-04:00') }], weekly), 9));
 const daily: Rule[] = [{ ...base, id: 8, position: 1, action: 'ig_story', maxCount: 30, frequency: 'day' }];
 test('daily: 11:59 PM and 12:01 AM ET are different days', () => assert.equal(pick({ action: 'ig_story', at: at('2026-10-21T00:01:00-04:00') }, [{ ruleId: 8, at: at('2026-10-20T23:59:00-04:00') }], daily), 8));
+
+test('event rule stops counting when the giveaway closes early', () => {
+  const closedEarly = { start: g.start, end: new Date('2026-11-20T19:00:00-05:00') };
+  assert.equal(chooseRule(rules, { action: 'ig_story', at: new Date('2026-11-20T19:30:00-05:00') }, closedEarly, [])?.id ?? null, null);
+});

@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "test:e2e": "DISCORD_TOKEN=x CLIENT_ID=x SERVER_ID=x DATABASE_URL=postgresql://postgres:test@localhost:5434/test ADMIN_API_KEY=e2e-key-0123456789-0123456789-0123456789 tsx tests/e2e/admin-api.e2e.ts"
   },
   "repository": {
     "type": "git",

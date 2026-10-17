@@ -258,8 +258,9 @@ export async function awardAction(input: {
   source: 'ig_api' | 'ig_webhook';
   taggedFriend?: boolean;
 }): Promise<AwardResult> {
-  const g = input.giveaway;
   if (input.igUsername === OWN_IG_HANDLE) return 'own-account';
+  // Re-read so a giveaway closed or edited moments ago is respected.
+  const g = (await getGiveaway(input.giveaway.id)) ?? input.giveaway;
 
   const already = await db.query.bonuses.findFirst({
     where: and(eq(bonuses.giveawayId, g.id), eq(bonuses.action, input.action), eq(bonuses.sourceRef, input.sourceRef)),

@@ -6,14 +6,14 @@ export type FormField = {
   label: string;
   type: 'ig_username' | 'short_text' | 'long_text' | 'select';
   required: boolean;
-  placeholder?: string;
-  options?: string[];
+  placeholder?: string | undefined;
+  options?: string[] | undefined;
 };
 
 export type AnnouncementSettings = {
   enabled: boolean;
-  milestoneEvery?: number;
-  countdownHours?: number[];
+  milestoneEvery?: number | undefined;
+  countdownHours?: number[] | undefined;
 };
 
 /**
@@ -52,7 +52,7 @@ export const giveaways = pgTable('giveaways', {
 });
 
 export type RuleAction = 'ig_comment' | 'ig_story';
-export type RuleOptions = { requireTag?: boolean };
+export type RuleOptions = { requireTag?: boolean | undefined };
 
 /**
  * How many times an action earns an entry. Optional time window and frequency.

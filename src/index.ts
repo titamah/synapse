@@ -17,13 +17,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 await runMigrations();
 console.log('Database ready');
 
-const webServer = startWebServer();
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildPresences, GatewayIntentBits.GuildMembers],
 });
 
 client.commands = new Collection();
+
+const webServer = startWebServer(client);
 
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsPath).filter(f => /\.(ts|js)$/.test(f) && !f.endsWith('.d.ts'));

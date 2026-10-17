@@ -7,6 +7,8 @@ import { webhookEvents } from '../db/schema.js';
 import { getOpenGiveaway } from '../giveaway/service.js';
 import { knownGiveawayPost } from '../instagram/api.js';
 import { filterInstagramPayload, processInstagramPayload } from '../instagram/webhook.js';
+import type { Client } from 'discord.js';
+import { createAdminRouter } from './admin.js';
 import { dataDeletionPage, privacyPage } from './pages.js';
 
 /** Constant-time check of Meta's X-Hub-Signature-256 header against the raw body. */
@@ -17,9 +19,12 @@ function validMetaSignature(rawBody: Buffer, header: string | undefined, secret:
   return expected.length === received.length && crypto.timingSafeEqual(expected, received);
 }
 
-export function createWebServer() {
+export function createWebServer(client?: Client) {
   const app = express();
   app.disable('x-powered-by');
+
+  // Private API for the admin dashboard (secret key required).
+  app.use('/admin', createAdminRouter(client));
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
@@ -98,8 +103,8 @@ export function createWebServer() {
   return app;
 }
 
-export function startWebServer() {
-  const server = createWebServer().listen(env.PORT, () => {
+export function startWebServer(client?: Client) {
+  const server = createWebServer(client).listen(env.PORT, () => {
     console.log(`Web server listening on :${env.PORT}`);
   });
   return server;
