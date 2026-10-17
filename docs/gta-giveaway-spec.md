@@ -12,13 +12,13 @@ BB-Bot is the Discord-facing worker for Synapse. For this campaign its job is to
 |---|---|---|---|---|
 | Join Discord + submit IG username | **Required** | 1 | `/giveaway enter` → form | Bot (automatic) |
 | Follow @BostonBlerds on IG | **Required** | — | Reminder in the bot's reply | Admin checks the **winner only** |
-| Comment on giveaway post + tag a friend | Bonus | +1 (max 1) | Pulled from the IG post (later: IG webhook) | Bot (comment must contain an `@tag`) |
-| Share giveaway post to IG Story + tag @BostonBlerds | Bonus | +1 (max 1) | Admin records it on the admin site until Meta approval, then the IG webhook | Admin |
+| Comment on giveaway post + tag a friend | Bonus | +1 (max 1) | IG webhook, plus a 10-minute sync of all comments | Bot (comment must @tag someone other than BB or the commenter) |
+| Share giveaway post to IG Story + tag @BostonBlerds | Bonus | +1 (max 1) | IG `messages` webhook (`story_mention`) | Bot |
 | Attend Retro Gaming Night, ticket scanned | Bonus | +1 (max 1) | Posh event report CSV (**Tickets Scanned** + **Instagram** columns) | Posh |
 
 **Max entries per person: 4.** Every bonus is capped at 1. No eligibility restrictions (no age, location or staff limits). **1 winner** (prize: GTA VI).
 
-> **Instagram limits:** Instagram's API can't tell you whether a given user follows you. Story-mention and comment *webhooks* need Meta approval (see §6a). Until we're approved, admins log Story shares by hand. The bot can also pull comments from our *own* post, which only needs standard access.
+> **Instagram limits:** Instagram's API can't tell you whether a user follows you, so follows are checked by hand for the winner only. Comments and Story mentions are automatic (see §6a).
 
 ---
 
@@ -116,16 +116,18 @@ Bonuses are linked by **IG username**, not by entrant. That's what lets unmatche
 - **Backups:** nightly `pg_dump` on the VM, plus a copy off the VM.
 - **Secrets:** `.env` on the VM only, never committed.
 
-## 6a. Meta app approval (runs in parallel; may gate launch)
+## 6a. Meta app (done — no App Review needed)
 
-Goal: receive `comments` and Story-mention webhooks automatically. Meta requires:
-- [ ] A Meta developer app using **Instagram API with Instagram Login**, connected to @BostonBlerds (Business account)
-- [ ] **Business Verification** for Boston Blerds
-- [ ] Public **Privacy Policy** and **Data Deletion** URLs (can be hosted on bostonblerds.com)
-- [ ] **App Review** for `instagram_business_manage_comments` and `instagram_business_manage_messages`, with a screencast
-- [ ] App switched to **Live** mode
+Meta's rules: apps used only for a business you own or manage run on Standard Access and **don't need App Review**. After publishing the app (Live mode), we confirmed on Oct 16, 2026:
+- ✅ **Comment webhooks** arrive live and award the comment bonus automatically.
+- ✅ **Reading all comments** via the API works, so a 10-minute sync catches anything a webhook missed, retroactively.
+- ✅ **Story mentions** arrive as `messages` webhooks with a `story_mention` attachment. The bot looks up the sender's username and awards the Story bonus.
 
-**Launch decision:** the launch can either wait for approval or go ahead on Oct 19 with manual Story logging. If it waits, the campaign dates in this spec shift. Either way, the Discord side is ready.
+Setup: Meta app "BB-Bot" in the Boston Blerds business portfolio, using Instagram API with Instagram Login. Webhook `https://api.bostonblerds.com/webhooks/instagram`, subscribed to `comments` and `messages`. Only giveaway-post comments and Story mentions are stored; other DMs are dropped.
+
+**Maintenance:** `IG_ACCESS_TOKEN` expires 60 days after it was generated (around Dec 15, 2026). Regenerate it in the Meta dashboard before then if the bot is still needed.
+
+**Before launch:** set `IG_GIVEAWAY_POST` to the giveaway post's link, and wipe the test entries and bonuses.
 
 ---
 
