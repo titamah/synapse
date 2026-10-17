@@ -1,6 +1,6 @@
 import { REST, Routes, type Client } from 'discord.js';
 import { env } from '../config/environment.js';
-import { getOpenGiveaway } from '../giveaway/service.js';
+import { acceptsDiscord, getOpenGiveaway } from '../giveaway/service.js';
 import { postToChannelCommand } from './postToChannel.js';
 
 /** Commands that only exist while a giveaway that takes Discord entries is open. */
@@ -14,9 +14,9 @@ let registeredWithGiveaway: boolean | undefined;
  * but only calls Discord when something changed.
  */
 export async function syncCommands(client: Client, force = false) {
-  // Instagram-only giveaways don't use /giveaway enter.
+  // Giveaways that don't take Discord entries (e.g. Instagram-only) don't use /giveaway enter.
   const open = await getOpenGiveaway();
-  const hasOpen = !!open && open.entryMethod !== 'instagram';
+  const hasOpen = !!open && acceptsDiscord(open);
   if (!force && hasOpen === registeredWithGiveaway) return;
 
   const body = [

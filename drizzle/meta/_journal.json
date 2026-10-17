@@ -64,6 +64,20 @@
       "when": 1792279380424,
       "tag": "0008_drop_legacy_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792280428069,
+      "tag": "0009_entry_methods_list",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792280458079,
+      "tag": "0010_drop_entry_method",
+      "breakpoints": true
     }
   ]
 }

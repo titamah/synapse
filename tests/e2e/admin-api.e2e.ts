@@ -236,10 +236,10 @@ ok('GTA giveaway untouched', (await api('GET', '/giveaways/1')).status === 200);
 
 // ----- Instagram entry method
 const igOnly = await api('POST', '/giveaways', {
-  name: 'IG Only', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethod: 'instagram',
+  name: 'IG Only', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethods: ['instagram'],
   rules: [{ action: 'ig_comment', maxCount: 1 }, { action: 'ig_tag', maxCount: 1, options: { captionIncludes: '#bbtest' } }],
 });
-ok('instagram-entry giveaway created (no form needed)', igOnly.status === 201 && igOnly.json.entryMethod === 'instagram', igOnly.json);
+ok('instagram-entry giveaway created (no form needed)', igOnly.status === 201 && igOnly.json.entryMethods.join() === 'instagram', igOnly.json);
 ok('instagram-entry without IG rules → 400', (await api('PATCH', `/giveaways/${igOnly.json.id}`, { rules: [] })).status === 400);
 const igG = await svc.getOpenGiveaway();
 const igAward = (action: string, ig: string, ref: string, extra: Record<string, unknown> = {}) =>
@@ -255,11 +255,12 @@ await api('POST', `/giveaways/${igOnly.json.id}/close`);
 
 // "Either": Instagram first, then Discord with the same IG username → one linked entrant.
 const either = await api('POST', '/giveaways', {
-  name: 'Either Way', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethod: 'either',
+  name: 'Either Way', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethods: ['discord', 'instagram'],
   formFields: [{ id: 'ig', label: 'Instagram username', type: 'ig_username', required: true }],
   rules: [{ action: 'ig_story', maxCount: 1 }],
 });
-ok('either giveaway created', either.status === 201, either.json);
+ok('discord + instagram giveaway created', either.status === 201 && either.json.entryMethods.join() === 'discord,instagram', either.json);
+ok('no entry methods → 400', (await api('PATCH', `/giveaways/${either.json.id}`, { entryMethods: [] })).status === 400);
 const eg = await svc.getOpenGiveaway();
 await svc.awardAction({ giveaway: eg, action: 'ig_story', igUsername: 'both_ways', at: new Date(), sourceRef: 's-both', source: 'ig_webhook' });
 const linked = await svc.submitEntry({ giveaway: eg, discordId: 'd-both', discordUsername: 'bothways', values: { ig: 'both_ways' } });

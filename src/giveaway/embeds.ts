@@ -1,6 +1,6 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
 import { formatDuration } from './announcementRules.js';
-import type { Giveaway } from './service.js';
+import { acceptsDiscord, acceptsInstagram, type Giveaway } from './service.js';
 
 const YELLOW = 0xffff00;
 const BLUE = 0x0088ff;
@@ -22,9 +22,8 @@ function base(g: Giveaway) {
 
 function enterLine(g: Giveaway) {
   const discord = `\`/giveaway enter\`${g.entryChannel ? ` in #${g.entryChannel}` : ''}`;
-  if (g.entryMethod === 'instagram') return 'Enter on Instagram: see @bostonblerds for how.';
-  if (g.entryMethod === 'either') return `Enter with ${discord}, or on Instagram.`;
-  return `Enter with ${discord}.`;
+  const ways = [acceptsDiscord(g) && `with ${discord}`, acceptsInstagram(g) && 'on Instagram (see @bostonblerds for how)'].filter(Boolean);
+  return `Enter ${ways.join(', or ')}.`;
 }
 
 export function startedEmbed(g: Giveaway) {

@@ -1,0 +1,1 @@
+ALTER TABLE "giveaways" DROP COLUMN "entry_method";

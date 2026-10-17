@@ -22,9 +22,9 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
   "startsAt": "2026-10-19T04:00:00.000Z",
   "endsAt": "2026-11-21T03:30:00.000Z",
   "closedAt": null, "closeReason": null | "cap" | "early",
-  "entryMethod": "discord" | "instagram" | "either",
+  "entryMethods": ["discord", "instagram"],        // one or more (a multi-select). More platforms may be added later.
     // discord: /giveaway enter (1 base entry) · instagram: your first counted Instagram action enters you
-    // (no Discord; /giveaway is hidden) · either: both, linked by IG username if someone does both
+    // Only instagram → no Discord needed and /giveaway is hidden · both → linked by IG username if someone does both
   "entryChannel": "gta-giveaway",                  // Discord channel NAME where /giveaway enter works
   "igMediaId": "18114618824037715",               // the giveaway's Instagram post (set via igPost)
   "igPermalink": "https://www.instagram.com/p/…/",
@@ -142,7 +142,7 @@ Set the giveaway's post with **`igPost`** on create or edit: a post link (`https
 | POST | `/giveaways/:id/winners/:winnerId/notify` | — | Sends the DM now · `503` if the bot is offline |
 | POST | `/giveaways/:id/winners/:winnerId/outcome` | `{ outcome: "accepted" \| "declined" }` | Updated `Winner` |
 
-**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `igPost`, `entryChannel`, `winnerCount`, `winnerSelect`, `notifyDelayMinutes`, `winnerMessage`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
+**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `entryMethods` (default `["discord"]`), `igPost`, `entryChannel`, `winnerCount`, `winnerSelect`, `notifyDelayMinutes`, `winnerMessage`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
 
 **PATCH rules:** send the **full list** in the order you want. Include `id` for existing rules, omit it for new ones; rules you leave out are deleted. Entries already earned under a deleted rule are kept.
 

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { eq, inArray } from 'drizzle-orm';
 import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
-import { giveawayRules, giveaways } from '../db/schema.js';
+import { ENTRY_METHODS, giveawayRules, giveaways, type EntryMethod } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
 import { serverMemberIds } from '../discord/members.js';
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
@@ -73,8 +73,8 @@ const giveawayFields = {
   name: z.string().min(1).max(80),
   startsAt: isoDate,
   endsAt: isoDate,
-  // discord = /giveaway enter; instagram = first counted Instagram action enters you; either = both.
-  entryMethod: unset(z.enum(['discord', 'instagram', 'either'])),
+  // One or more: discord = /giveaway enter; instagram = your first counted Instagram action enters you.
+  entryMethods: unset(z.array(z.enum(ENTRY_METHODS)).min(1, 'pick at least one way to enter').max(ENTRY_METHODS.length)).transform(v => (v ? [...new Set(v)] : v)),
   // null = clear the setting
   entryChannel: z.string().max(100).nullish(),
   // The giveaway's Instagram post: a link (instagram.com/p/…) or media ID. Can be set any time,
@@ -114,7 +114,7 @@ type GiveawayInput = z.infer<typeof updateSchema>;
 
 /** Checks that need the whole picture: dates, IG setup, unique field ids. Returns an error message or null. */
 function crossCheck(merged: {
-  entryMethod?: 'discord' | 'instagram' | 'either' | undefined;
+  entryMethods?: EntryMethod[] | undefined;
   startsAt: Date | null;
   endsAt: Date;
   formFields: { id: string; type: string }[];
@@ -125,9 +125,10 @@ function crossCheck(merged: {
   if (new Set(ids).size !== ids.length) return 'form field ids must be unique';
   if (merged.formFields.filter(f => f.type === 'ig_username').length > 1) return 'only one Instagram username field allowed';
   const igRules = merged.rules.some(r => r.action.startsWith('ig_'));
-  if (merged.entryMethod === 'instagram' && !igRules) return 'Instagram-entry giveaways need at least one Instagram rule (that\'s how people enter)';
+  const methods = merged.entryMethods ?? ['discord'];
+  if (methods.includes('instagram') && !igRules) return 'Instagram entry needs at least one Instagram rule (that\'s how people enter)';
   // Discord entrants are matched to their Instagram activity by the username they give in the form.
-  if (igRules && merged.entryMethod !== 'instagram' && !merged.formFields.some(f => f.type === 'ig_username')) {
+  if (igRules && methods.includes('discord') && !merged.formFields.some(f => f.type === 'ig_username')) {
     return 'Instagram rules need an Instagram username field in the form';
   }
   for (const r of merged.rules) {
@@ -261,7 +262,7 @@ export function createAdminRouter(client?: Client) {
           name: input.name,
           startsAt: input.startsAt,
           endsAt: input.endsAt,
-          entryMethod: input.entryMethod ?? 'discord',
+          entryMethods: input.entryMethods ?? ['discord'],
           entryChannel: input.entryChannel ?? null,
           igMediaId: igPost?.id ?? null,
           igPostedAt: igPost ? new Date(igPost.postedAt) : null,
@@ -312,7 +313,7 @@ export function createAdminRouter(client?: Client) {
     const currentRules = await getRules(g.id);
 
     const merged = {
-      entryMethod: input.entryMethod ?? g.entryMethod,
+      entryMethods: input.entryMethods ?? g.entryMethods,
       startsAt: input.startsAt ?? g.startsAt,
       endsAt: input.endsAt ?? g.endsAt,
       formFields: input.formFields ?? g.formFields,

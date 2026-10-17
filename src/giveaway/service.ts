@@ -40,6 +40,11 @@ export function statusOf(g: Giveaway, now = new Date()): GiveawayStatus {
   return 'open';
 }
 
+/** Does this giveaway take entries through /giveaway enter? */
+export const acceptsDiscord = (g: Giveaway) => g.entryMethods.includes('discord');
+/** Does a person's first counted Instagram action enter them? */
+export const acceptsInstagram = (g: Giveaway) => g.entryMethods.includes('instagram');
+
 export async function audit(giveawayId: number | null, actorId: string, action: string, details: Record<string, unknown> = {}) {
   await db.insert(auditLog).values({ giveawayId, actorId, action, details });
 }
@@ -205,7 +210,7 @@ export async function submitEntry(input: {
   values: Record<string, string>;
 }): Promise<EntryResult> {
   const g = input.giveaway;
-  if (statusOf(g) !== 'open' || g.entryMethod === 'instagram') return { status: 'closed' };
+  if (statusOf(g) !== 'open' || !acceptsDiscord(g)) return { status: 'closed' };
 
   let igUsername: string | null = null;
   const answers: Record<string, string> = {};
@@ -230,7 +235,7 @@ export async function submitEntry(input: {
 
   if (igUsername) {
     let owner = await getEntrantByIg(g.id, igUsername);
-    // "Either" giveaways: someone who already entered through Instagram is now linking Discord.
+    // Discord + Instagram giveaways: someone who already entered through Instagram is now linking Discord.
     if (owner && owner.discordId === null) {
       if (owner.revokedAt) return { status: 'revoked', entrant: owner };
       owner = await linkInstagramEntrant(g, owner, existing, input.discordId, input.discordUsername);
@@ -349,7 +354,7 @@ export async function awardAction(input: {
   // Instagram-entry giveaways: a new person's first counted action enters them, if there's room.
   const person = await getEntrantByIg(g.id, input.igUsername);
   if (person?.revokedAt) return 'disqualified';
-  const createsEntrant = !person && g.entryMethod !== 'discord';
+  const createsEntrant = !person && acceptsInstagram(g);
   if (createsEntrant && g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) return 'full';
 
   const prior = await db

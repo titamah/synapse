@@ -1,4 +1,9 @@
+import { sql } from 'drizzle-orm';
 import { boolean, pgEnum, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
+
+/** Ways to enter a giveaway. New platforms get added here. */
+export const ENTRY_METHODS = ['discord', 'instagram'] as const;
+export type EntryMethod = (typeof ENTRY_METHODS)[number];
 
 /** One entry-form field. Discord forms allow up to 5. */
 export type FormField = {
@@ -39,8 +44,8 @@ export const giveaways = pgTable('giveaways', {
   endsAt: timestamp('closes_at', { withTimezone: true }).notNull(),
   closedAt: timestamp('closed_at', { withTimezone: true }),
   closeReason: text('close_reason'),
-  // How people enter: Discord (/giveaway enter), Instagram (first counted Instagram action), or either.
-  entryMethod: text('entry_method').$type<'discord' | 'instagram' | 'either'>().notNull().default('discord'),
+  // How people can enter (one or more): discord = /giveaway enter; instagram = first counted Instagram action.
+  entryMethods: text('entry_methods').array().$type<EntryMethod[]>().notNull().default(sql`ARRAY['discord']::text[]`),
   entryChannel: text('entry_channel'),
   formFields: jsonb('form_fields').$type<FormField[]>().notNull().default([]),
   reminderText: text('reminder_text'),
