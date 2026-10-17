@@ -234,6 +234,40 @@ const summary = (await pool.query(`SELECT * FROM audit_log WHERE action='giveawa
 ok('deletion summary kept in audit log', summary?.actor_id === 'admin:tester@bostonblerds.com' && summary.details.entrants === 2, summary);
 ok('GTA giveaway untouched', (await api('GET', '/giveaways/1')).status === 200);
 
+// ----- Instagram entry method
+const igOnly = await api('POST', '/giveaways', {
+  name: 'IG Only', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethod: 'instagram',
+  rules: [{ action: 'ig_comment', maxCount: 1 }, { action: 'ig_tag', maxCount: 1, options: { captionIncludes: '#bbtest' } }],
+});
+ok('instagram-entry giveaway created (no form needed)', igOnly.status === 201 && igOnly.json.entryMethod === 'instagram', igOnly.json);
+ok('instagram-entry without IG rules → 400', (await api('PATCH', `/giveaways/${igOnly.json.id}`, { rules: [] })).status === 400);
+const igG = await svc.getOpenGiveaway();
+const igAward = (action: string, ig: string, ref: string, extra: Record<string, unknown> = {}) =>
+  svc.awardAction({ giveaway: igG, action, igUsername: ig, at: new Date(), sourceRef: ref, source: 'ig_webhook', ...extra });
+ok('first comment enters an Instagram-only person', (await igAward('ig_comment', 'fan_one', 'igc1')) === 'awarded');
+ok('tagged post without the caption text → no entry', (await igAward('ig_tag', 'fan_one', 'igt1', { caption: 'hi' })) === 'no-rule');
+ok('tagged post with the caption text → entry', (await igAward('ig_tag', 'fan_one', 'igt2', { caption: 'entering #BBTest!' })) === 'awarded');
+ok('Discord entries refused in instagram-only giveaways', (await svc.submitEntry({ giveaway: igG, discordId: 'dz', discordUsername: 'z', values: {} })).status === 'closed');
+let igEnts = await api('GET', `/giveaways/${igOnly.json.id}/entrants`);
+const fan = igEnts.json.entrants.find((e: any) => e.igUsername === 'fan_one');
+ok('instagram-only entrant: no Discord, entries = actions (2)', fan && fan.discordId === null && fan.totalEntries === 2 && fan.inServer === null, igEnts.json);
+await api('POST', `/giveaways/${igOnly.json.id}/close`);
+
+// "Either": Instagram first, then Discord with the same IG username → one linked entrant.
+const either = await api('POST', '/giveaways', {
+  name: 'Either Way', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethod: 'either',
+  formFields: [{ id: 'ig', label: 'Instagram username', type: 'ig_username', required: true }],
+  rules: [{ action: 'ig_story', maxCount: 1 }],
+});
+ok('either giveaway created', either.status === 201, either.json);
+const eg = await svc.getOpenGiveaway();
+await svc.awardAction({ giveaway: eg, action: 'ig_story', igUsername: 'both_ways', at: new Date(), sourceRef: 's-both', source: 'ig_webhook' });
+const linked = await svc.submitEntry({ giveaway: eg, discordId: 'd-both', discordUsername: 'bothways', values: { ig: 'both_ways' } });
+ok('Discord entry links to the Instagram entrant', linked.status !== 'conflict' && linked.entrant?.discordId === 'd-both', linked);
+const eEnts = await api('GET', `/giveaways/${either.json.id}/entrants`);
+ok('linked entrant: 1 base + 1 story = 2 entries, one row', eEnts.json.entrants.length === 1 && eEnts.json.entrants[0].totalEntries === 2, eEnts.json);
+await api('POST', `/giveaways/${either.json.id}/close`);
+
 srv.close();
 await pool.end();
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');

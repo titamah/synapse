@@ -19,6 +19,8 @@ export type ActionContext = {
   at: Date;
   /** For comments: did it @mention someone other than us or the commenter? */
   taggedFriend?: boolean;
+  /** For tagged posts: the post's caption. */
+  caption?: string;
 };
 
 const TZ = 'America/New_York';
@@ -57,6 +59,7 @@ export function chooseRule(
   const candidates = rules
     .filter(r => r.action === ctx.action)
     .filter(r => !r.options.requireTag || ctx.taggedFriend)
+    .filter(r => !r.options.captionIncludes || (ctx.caption ?? '').toLowerCase().includes(r.options.captionIncludes.toLowerCase()))
     .map(r => {
       // A rule's window never reaches outside the giveaway itself (e.g. after it closed early).
       const start = new Date(Math.max((r.windowStart ?? giveawayWindow.start).getTime(), giveawayWindow.start.getTime()));

@@ -39,6 +39,8 @@ export const giveaways = pgTable('giveaways', {
   endsAt: timestamp('closes_at', { withTimezone: true }).notNull(),
   closedAt: timestamp('closed_at', { withTimezone: true }),
   closeReason: text('close_reason'),
+  // How people enter: Discord (/giveaway enter), Instagram (first counted Instagram action), or either.
+  entryMethod: text('entry_method').$type<'discord' | 'instagram' | 'either'>().notNull().default('discord'),
   entryChannel: text('entry_channel'),
   igHashtag: text('ig_hashtag'),
   formFields: jsonb('form_fields').$type<FormField[]>().notNull().default([]),
@@ -69,8 +71,13 @@ export const giveaways = pgTable('giveaways', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export type RuleAction = 'ig_comment' | 'ig_story';
-export type RuleOptions = { requireTag?: boolean | undefined };
+export type RuleAction = 'ig_comment' | 'ig_story' | 'ig_tag';
+export type RuleOptions = {
+  /** ig_comment: must @mention someone other than us or the commenter. */
+  requireTag?: boolean | undefined;
+  /** ig_tag: the post's caption must contain this text (e.g. a hashtag), case-insensitive. */
+  captionIncludes?: string | undefined;
+};
 
 /**
  * How many times an action earns an entry. Optional time window and frequency.
@@ -93,14 +100,15 @@ export const giveawayRules = pgTable(
   t => [index('giveaway_rules_giveaway_idx').on(t.giveawayId)],
 );
 
-/** One row per person: the base entry. */
+/** One row per person. A Discord entry is worth 1 base entry; Instagram-only entrants start at 0 plus their actions. */
 export const entrants = pgTable(
   'entrants',
   {
     id: serial('id').primaryKey(),
     giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id),
-    discordId: text('discord_id').notNull(),
-    discordUsername: text('discord_username').notNull(),
+    // Null for people who entered through Instagram only.
+    discordId: text('discord_id'),
+    discordUsername: text('discord_username'),
     // Null in Discord-only giveaways.
     igUsername: text('ig_username'),
     answers: jsonb('answers').$type<Record<string, string>>().notNull().default({}),

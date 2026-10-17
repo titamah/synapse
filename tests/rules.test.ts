@@ -36,3 +36,10 @@ test('event rule stops counting when the giveaway closes early', () => {
   const closedEarly = { start: g.start, end: new Date('2026-11-20T19:00:00-05:00') };
   assert.equal(chooseRule(rules, { action: 'ig_story', at: new Date('2026-11-20T19:30:00-05:00') }, closedEarly, [])?.id ?? null, null);
 });
+
+test('captionIncludes: tagged post must mention the text (case-insensitive)', () => {
+  const tagRule: Rule[] = [{ ...base, id: 20, position: 1, action: 'ig_tag', maxCount: 1, options: { captionIncludes: '#BBxGTAVI' } }];
+  const at = new Date('2026-10-25T12:00:00-04:00');
+  assert.equal(chooseRule(tagRule, { action: 'ig_tag', at, caption: 'so hyped #bbxgtavi' }, g, [])?.id ?? null, 20);
+  assert.equal(chooseRule(tagRule, { action: 'ig_tag', at, caption: 'no tag here' }, g, [])?.id ?? null, null);
+});

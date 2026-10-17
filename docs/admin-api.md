@@ -22,6 +22,9 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
   "startsAt": "2026-10-19T04:00:00.000Z",
   "endsAt": "2026-11-21T03:30:00.000Z",
   "closedAt": null, "closeReason": null | "cap" | "early",
+  "entryMethod": "discord" | "instagram" | "either",
+    // discord: /giveaway enter (1 base entry) · instagram: your first counted Instagram action enters you
+    // (no Discord; /giveaway is hidden) · either: both, linked by IG username if someone does both
   "entryChannel": "gta-giveaway",                  // Discord channel NAME where /giveaway enter works
   "igMediaId": "18114618824037715",               // the giveaway's Instagram post (set via igPost)
   "igPermalink": "https://www.instagram.com/p/…/",
@@ -29,7 +32,10 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
   "igSync": {                                       // last comment read; null if none yet
     "lastRunAt": "…", "lastSuccessAt": "…", "lastReason": "scheduled" | "post-set" | "final" | "manual",
     "lastError": null,                              // a message here = Instagram isn't working (e.g. token expired). Show a warning.
-    "lastResult": { "comments": 42, "hidden": 1, "removed": 1, "awarded": 3, "duplicate": 38 }
+    "lastResult": {
+      "comments": { "comments": 42, "hidden": 1, "removed": 1, "awarded": 3, "duplicate": 38 } | null,   // null = no post set
+      "taggedPosts": { "posts": 5, "removed": 0, "awarded": 2, "no-rule": 3 } | null                    // null = no tagged-post rule
+    }
   },
   "formFields": [ /* FormField, max 5 */ ],
   "reminderText": "Don't forget to follow [@BostonBlerds](https://instagram.com/bostonblerds)!",  // Discord markdown, links OK
@@ -67,11 +73,12 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
 ### Rule ("+ Add rule")
 ```jsonc
 { "id": 7,                       // omit when adding a new rule
-  "action": "ig_comment" | "ig_story",
+  "action": "ig_comment" | "ig_story" | "ig_tag",   // ig_tag = someone's post that tags @BostonBlerds
   "maxCount": 5,                 // times it can award an entry to one person
   "windowStart": null, "windowEnd": null,   // optional; default = whole giveaway
   "frequency": null | "day" | "week",       // optional; Eastern time, weeks Mon–Sun
-  "options": { "requireTag": true },        // ig_comment only: must @tag a friend
+  "options": { "requireTag": true,          // ig_comment: must @tag a friend
+               "captionIncludes": "#BBxGTAVI" },  // ig_tag: caption must contain this text
   "description": "#1 Instagram comment (max 1, must tag a friend)"  // read-only
 }
 ```
@@ -118,6 +125,7 @@ Set the giveaway's post with **`igPost`** on create or edit: a post link (`https
   "status": "pending" | "notified" | "unreachable" | "accepted" | "declined" | "expired",
   "entriesAtDraw": 3, "notifyAt": "…", "notifiedAt": "…", "claimDeadline": "…", "respondedAt": "…", "outcomeBy": "…" }
 ```
+- **Instagram-only winners** can't be DMed, so they go straight to **unreachable** and admins reach out on Instagram.
 - **pending:** picked, DM not sent yet (auto notify) or waiting for admins to report (manual notify).
 - **notified:** DM sent; **unreachable:** their DMs are closed, so admins reach out and report.
 - **declined / expired:** stays in the history, and **all their entries are disqualified**. The slot is refilled: auto-select draws again (with the notify delay), manual-select asks admins to pick.
@@ -138,9 +146,13 @@ Set the giveaway's post with **`igPost`** on create or edit: a post link (`https
 
 **Only one giveaway at a time:** creating or moving dates so two not-closed giveaways overlap returns `409`.
 
+**Entries:** a Discord entry is worth 1 base entry; each counted Instagram action adds 1. Instagram-only entrants (no Discord) start at 0, so their first counted action is worth 1.
+
+**Tagged posts** (`ig_tag`) are read every 30 minutes (and on "Sync now"), back to `startsAt`. They don't need `igPost`. A deleted post, or one that no longer tags us, loses its entry.
+
 ### Entrant (from `/entrants`)
 ```jsonc
-{ "id": 12, "discordId": "1234", "discordUsername": "alex", "igUsername": "alex.plays",
+{ "id": 12, "discordId": "1234", "discordUsername": "alex", "igUsername": "alex.plays",   // discordId/discordUsername null = Instagram-only
   "answers": { "platform": "PS5" },
   "revokedAt": null, "revokedReason": null,        // disqualified if revokedAt is set
   "totalEntries": 3,                               // 1 base + active bonuses; 0 if disqualified

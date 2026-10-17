@@ -3,7 +3,7 @@ import { env } from '../config/environment.js';
 import { getOpenGiveaway } from '../giveaway/service.js';
 import { postToChannelCommand } from './postToChannel.js';
 
-/** Commands that only exist while a giveaway is open, so members never see a dead command. */
+/** Commands that only exist while a giveaway that takes Discord entries is open. */
 const GIVEAWAY_ONLY = new Set(['giveaway']);
 
 let registeredWithGiveaway: boolean | undefined;
@@ -14,7 +14,9 @@ let registeredWithGiveaway: boolean | undefined;
  * but only calls Discord when something changed.
  */
 export async function syncCommands(client: Client, force = false) {
-  const hasOpen = !!(await getOpenGiveaway());
+  // Instagram-only giveaways don't use /giveaway enter.
+  const open = await getOpenGiveaway();
+  const hasOpen = !!open && open.entryMethod !== 'instagram';
   if (!force && hasOpen === registeredWithGiveaway) return;
 
   const body = [

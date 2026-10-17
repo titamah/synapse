@@ -1,4 +1,4 @@
-import { OWN_IG_HANDLE, awardAction, countedCommentBonuses, normalizeIg, revokeBonus, type Giveaway } from '../giveaway/service.js';
+import { OWN_IG_HANDLE, awardAction, countedBonuses, normalizeIg, revokeBonus, type Giveaway } from '../giveaway/service.js';
 import { getAllComments, knownGiveawayPost } from './api.js';
 
 /** "Tag a friend": the comment @mentions someone other than us or the commenter. */
@@ -43,7 +43,7 @@ export async function syncComments(g: Giveaway) {
   const all = await getAllComments(post.id);
   const visible = all.filter(c => !c.hidden);
 
-  const removed = commentsToRevoke(await countedCommentBonuses(g.id), new Set(visible.map(c => c.id)));
+  const removed = commentsToRevoke(await countedBonuses(g.id, 'ig_comment'), new Set(visible.map(c => c.id)));
   for (const b of removed) await revokeBonus(g.id, b.id, 'system:instagram', 'Comment deleted or hidden');
 
   const counts: Record<string, number> = {};

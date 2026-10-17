@@ -20,7 +20,12 @@ function base(g: Giveaway) {
     .setTimestamp(new Date());
 }
 
-const enterLine = (g: Giveaway) => `Enter with \`/giveaway enter\`${g.entryChannel ? ` in #${g.entryChannel}` : ''}.`;
+function enterLine(g: Giveaway) {
+  const discord = `\`/giveaway enter\`${g.entryChannel ? ` in #${g.entryChannel}` : ''}`;
+  if (g.entryMethod === 'instagram') return 'Enter on Instagram: see @bostonblerds for how.';
+  if (g.entryMethod === 'either') return `Enter with ${discord}, or on Instagram.`;
+  return `Enter with ${discord}.`;
+}
 
 export function startedEmbed(g: Giveaway) {
   return base(g)

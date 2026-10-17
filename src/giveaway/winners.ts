@@ -39,13 +39,13 @@ async function entrantFor(w: Winner): Promise<Entrant> {
   return (await db.query.entrants.findFirst({ where: (e, { eq: eq_ }) => eq_(e.id, w.entrantId) }))!;
 }
 
-/** Who can still win: not disqualified, still in the server, never picked before. Weighted by entries. */
+/** Who can still win: not disqualified, still in the server (Discord entrants), never picked before. Weighted by entries. */
 export async function eligiblePool(g: Giveaway, client?: Client) {
   const { entrants } = await entrantReport(g.id);
   const already = new Set((await listWinners(g.id)).map(w => w.entrantId));
   const members = await serverMemberIds(client);
   return entrants
-    .filter(e => !e.revokedAt && !already.has(e.id) && (!members || members.has(e.discordId)))
+    .filter(e => !e.revokedAt && !already.has(e.id) && (!members || !e.discordId || members.has(e.discordId)))
     .map(e => ({ entrant: e, weight: e.totalEntries }));
 }
 
@@ -61,7 +61,8 @@ function winnerEmbed(g: Giveaway, title: string, lines: string[], color = GOLD) 
     .setTimestamp(new Date());
 }
 
-const who = (e: Entrant) => `<@${e.discordId}>${e.igUsername ? ` (IG @${e.igUsername})` : ''}`;
+const who = (e: Entrant) =>
+  e.discordId ? `<@${e.discordId}>${e.igUsername ? ` (IG @${e.igUsername})` : ''}` : `IG @${e.igUsername} (Instagram only)`;
 
 function button(id: string, label: string, style: ButtonStyle) {
   return new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
@@ -125,6 +126,17 @@ export async function notifyWinner(client: Client, winnerId: number, by = 'auto'
   const g = (await getGiveaway(w.giveawayId))!;
   const entrant = await entrantFor(w);
   const deadline = new Date(Date.now() + g.claimHours * 3_600_000);
+
+  // Instagram-only winners have no Discord account to DM.
+  if (!entrant.discordId) {
+    await db.update(winners).set({ status: 'unreachable', notifiedAt: new Date() }).where(eq(winners.id, w.id));
+    await audit(g.id, by, 'winner.unreachable', { winnerId: w.id, reason: 'instagram-only' });
+    await postAdmin(client, {
+      embeds: [winnerEmbed(g, `📸 Instagram-only winner`, [`${who(entrant)} entered through Instagram, so the bot can't DM them.`, 'Reach out on Instagram, then report what they said:'])],
+      components: [reportRow({ ...w, status: 'unreachable' })],
+    });
+    return { ok: false as const, error: 'Instagram-only winner: admins were asked to reach out on Instagram.' };
+  }
 
   try {
     const user = await client.users.fetch(entrant.discordId);

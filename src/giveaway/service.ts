@@ -219,7 +219,7 @@ export async function submitEntry(input: {
   values: Record<string, string>;
 }): Promise<EntryResult> {
   const g = input.giveaway;
-  if (statusOf(g) !== 'open') return { status: 'closed' };
+  if (statusOf(g) !== 'open' || g.entryMethod === 'instagram') return { status: 'closed' };
 
   let igUsername: string | null = null;
   const answers: Record<string, string> = {};
@@ -239,11 +239,17 @@ export async function submitEntry(input: {
     }
   }
 
-  const existing = await getEntrantByDiscord(g.id, input.discordId);
+  let existing = await getEntrantByDiscord(g.id, input.discordId);
   if (existing?.revokedAt) return { status: 'revoked', entrant: existing };
 
   if (igUsername) {
-    const owner = await getEntrantByIg(g.id, igUsername);
+    let owner = await getEntrantByIg(g.id, igUsername);
+    // "Either" giveaways: someone who already entered through Instagram is now linking Discord.
+    if (owner && owner.discordId === null) {
+      if (owner.revokedAt) return { status: 'revoked', entrant: owner };
+      owner = await linkInstagramEntrant(g, owner, existing, input.discordId, input.discordUsername);
+      existing = owner;
+    }
     if (owner && owner.discordId !== input.discordId) {
       await audit(g.id, input.discordId, 'entry.ig_conflict', {
         igUsername,
@@ -295,6 +301,26 @@ export async function submitEntry(input: {
   return { status: existing ? 'updated' : 'created', entrant };
 }
 
+/**
+ * Links an Instagram-only entrant to the Discord account that just entered with the same IG
+ * username. If that Discord account already had its own entry, the two are merged into one.
+ */
+async function linkInstagramEntrant(g: Giveaway, igEntrant: Entrant, discordEntrant: Entrant | undefined, discordId: string, discordUsername: string) {
+  return db.transaction(async tx => {
+    if (discordEntrant && discordEntrant.id !== igEntrant.id) {
+      await tx.update(bonuses).set({ entrantId: igEntrant.id }).where(eq(bonuses.entrantId, discordEntrant.id));
+      await tx.delete(entrants).where(eq(entrants.id, discordEntrant.id));
+    }
+    const [linked] = await tx
+      .update(entrants)
+      .set({ discordId, discordUsername, updatedAt: new Date() })
+      .where(eq(entrants.id, igEntrant.id))
+      .returning();
+    await tx.insert(auditLog).values({ giveawayId: g.id, actorId: discordId, action: 'entry.linked_discord', details: { igUsername: igEntrant.igUsername, discordUsername } });
+    return linked!;
+  });
+}
+
 export async function setEntrantRevoked(giveawayId: number, entrantId: number, actorId: string, reason: string | null) {
   const revoking = reason !== null;
   const rows = await db
@@ -309,7 +335,7 @@ export async function setEntrantRevoked(giveawayId: number, entrantId: number, a
 // ---------------------------------------------------------------------------
 // Bonus entries
 
-export type AwardResult = 'awarded' | 'no-rule' | 'duplicate' | 'own-account';
+export type AwardResult = 'awarded' | 'no-rule' | 'duplicate' | 'own-account' | 'full' | 'disqualified';
 
 /**
  * Records an Instagram action and awards an entry if a rule has room for it.
@@ -323,6 +349,7 @@ export async function awardAction(input: {
   sourceRef: string;
   source: 'ig_api' | 'ig_webhook';
   taggedFriend?: boolean;
+  caption?: string;
 }): Promise<AwardResult> {
   if (input.igUsername === OWN_IG_HANDLE) return 'own-account';
   // Re-read so a giveaway closed or edited moments ago is respected.
@@ -333,6 +360,12 @@ export async function awardAction(input: {
   });
   if (already) return 'duplicate';
 
+  // Instagram-entry giveaways: a new person's first counted action enters them, if there's room.
+  const person = await getEntrantByIg(g.id, input.igUsername);
+  if (person?.revokedAt) return 'disqualified';
+  const createsEntrant = !person && g.entryMethod !== 'discord';
+  if (createsEntrant && g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) return 'full';
+
   const prior = await db
     .select({ ruleId: bonuses.ruleId, at: bonuses.createdAt })
     .from(bonuses)
@@ -340,7 +373,12 @@ export async function awardAction(input: {
 
   const rule = chooseRule(
     await getRules(g.id),
-    { action: input.action, at: input.at, ...(input.taggedFriend !== undefined ? { taggedFriend: input.taggedFriend } : {}) },
+    {
+      action: input.action,
+      at: input.at,
+      ...(input.taggedFriend !== undefined ? { taggedFriend: input.taggedFriend } : {}),
+      ...(input.caption !== undefined ? { caption: input.caption } : {}),
+    },
     { start: g.startsAt ?? g.createdAt, end: g.closedAt ?? g.endsAt },
     prior,
   );
@@ -363,6 +401,14 @@ export async function awardAction(input: {
   if (!inserted.length) return 'duplicate';
 
   await audit(g.id, 'system:instagram', 'bonus.awarded', { igUsername: input.igUsername, action: input.action, ruleId: rule.id });
+
+  if (createsEntrant) {
+    const created = await db.insert(entrants).values({ giveawayId: g.id, igUsername: input.igUsername }).onConflictDoNothing().returning();
+    if (created.length) {
+      await audit(g.id, 'system:instagram', 'entry.created', { igUsername: input.igUsername, via: input.action });
+      if (g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) await closeGiveaway(g.id, 'system', 'cap');
+    }
+  }
   return 'awarded';
 }
 
@@ -377,12 +423,12 @@ export async function addManualBonus(giveawayId: number, entrantId: number, labe
   return bonus;
 }
 
-/** Comment entries currently counted for a giveaway, keyed by comment ID. */
-export async function countedCommentBonuses(giveawayId: number) {
+/** Entries currently counted for one action (e.g. comments), with the Instagram ID they came from. */
+export async function countedBonuses(giveawayId: number, action: RuleAction) {
   return db
     .select({ id: bonuses.id, sourceRef: bonuses.sourceRef })
     .from(bonuses)
-    .where(and(eq(bonuses.giveawayId, giveawayId), eq(bonuses.action, 'ig_comment'), isNull(bonuses.revokedAt)));
+    .where(and(eq(bonuses.giveawayId, giveawayId), eq(bonuses.action, action), isNull(bonuses.revokedAt)));
 }
 
 export async function revokeBonus(giveawayId: number, bonusId: number, actorId: string, reason: string) {
@@ -400,7 +446,7 @@ export async function revokeBonus(giveawayId: number, bonusId: number, actorId: 
 
 export type EntrantReport = Entrant & {
   bonuses: Bonus[];
-  /** Base entry (1) plus active bonuses; 0 if disqualified. */
+  /** Base entry (1, Discord entrants only) plus active bonuses; 0 if disqualified. */
   totalEntries: number;
 };
 
@@ -424,7 +470,8 @@ export async function entrantReport(giveawayId: number) {
 
   const report: EntrantReport[] = people.map(p => {
     const list = byEntrant.get(p.id) ?? [];
-    return { ...p, bonuses: list, totalEntries: p.revokedAt ? 0 : 1 + list.length };
+    // A Discord entry is worth 1 base entry; Instagram-only entrants count their actions.
+    return { ...p, bonuses: list, totalEntries: p.revokedAt ? 0 : (p.discordId ? 1 : 0) + list.length };
   });
   return { entrants: report, unmatched };
 }

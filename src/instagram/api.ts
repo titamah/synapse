@@ -146,6 +146,26 @@ export async function getAllComments(mediaId: string): Promise<IgComment[]> {
     .filter((c): c is IgComment => c !== null);
 }
 
+export type TaggedPost = { id: string; username: string; caption: string; permalink: string; timestamp: string };
+
+/**
+ * Other people's posts that tag @BostonBlerds, newest first, back to `since`.
+ * Stops paging once posts are older than `since`.
+ */
+export async function getTaggedPosts(since: Date): Promise<TaggedPost[]> {
+  type Raw = { id: string; username?: string; caption?: string; permalink: string; timestamp: string };
+  const out: TaggedPost[] = [];
+  let page = await graphGet<Page<Raw>>('/me/tags', { fields: 'id,username,caption,permalink,timestamp', limit: '50' });
+  for (;;) {
+    for (const p of page.data) {
+      if (new Date(p.timestamp) < since) return out;
+      if (p.username) out.push({ id: p.id, username: p.username, caption: p.caption ?? '', permalink: p.permalink, timestamp: p.timestamp });
+    }
+    if (!page.paging?.next) return out;
+    page = await graphGet<Page<Raw>>(page.paging.next);
+  }
+}
+
 /** Story mentions only include the sender's Instagram-scoped ID; this looks up their username. */
 export async function getUsernameForSender(senderId: string): Promise<string> {
   const user = await graphGet<{ username: string }>(`/${senderId}`, { fields: 'username' });

@@ -10,6 +10,7 @@ import { toCsv } from '../lib/csv.js';
 import { serverMemberIds } from '../discord/members.js';
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
+import { hasTagRules } from '../instagram/tags.js';
 import { announceExtended } from '../giveaway/announcements.js';
 import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
 import { drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
@@ -58,19 +59,21 @@ const formFieldSchema = z
 
 const ruleSchema = z.object({
   id: unset(z.number().int()),
-  action: z.enum(['ig_comment', 'ig_story']),
+  action: z.enum(['ig_comment', 'ig_story', 'ig_tag']),
   maxCount: z.number().int().min(1).max(1000),
   // null = no window / no frequency
   windowStart: isoDate.nullish(),
   windowEnd: isoDate.nullish(),
   frequency: z.enum(['day', 'week']).nullish(),
-  options: unset(z.object({ requireTag: unset(z.boolean()) })),
+  options: unset(z.object({ requireTag: unset(z.boolean()), captionIncludes: unset(z.string().min(1).max(100)) })),
 });
 
 const giveawayFields = {
   name: z.string().min(1).max(80),
   startsAt: isoDate,
   endsAt: isoDate,
+  // discord = /giveaway enter; instagram = first counted Instagram action enters you; either = both.
+  entryMethod: unset(z.enum(['discord', 'instagram', 'either'])),
   // null = clear the setting
   entryChannel: z.string().max(100).nullish(),
   // The giveaway's Instagram post: a link (instagram.com/p/…) or media ID. Can be set any time,
@@ -110,6 +113,7 @@ type GiveawayInput = z.infer<typeof updateSchema>;
 
 /** Checks that need the whole picture: dates, IG setup, unique field ids. Returns an error message or null. */
 function crossCheck(merged: {
+  entryMethod?: 'discord' | 'instagram' | 'either' | undefined;
   startsAt: Date | null;
   endsAt: Date;
   formFields: { id: string; type: string }[];
@@ -119,7 +123,10 @@ function crossCheck(merged: {
   const ids = merged.formFields.map(f => f.id);
   if (new Set(ids).size !== ids.length) return 'form field ids must be unique';
   if (merged.formFields.filter(f => f.type === 'ig_username').length > 1) return 'only one Instagram username field allowed';
-  if (merged.rules.some(r => r.action.startsWith('ig_')) && !merged.formFields.some(f => f.type === 'ig_username')) {
+  const igRules = merged.rules.some(r => r.action.startsWith('ig_'));
+  if (merged.entryMethod === 'instagram' && !igRules) return 'Instagram-entry giveaways need at least one Instagram rule (that\'s how people enter)';
+  // Discord entrants are matched to their Instagram activity by the username they give in the form.
+  if (igRules && merged.entryMethod !== 'instagram' && !merged.formFields.some(f => f.type === 'ig_username')) {
     return 'Instagram rules need an Instagram username field in the form';
   }
   for (const r of merged.rules) {
@@ -131,7 +138,12 @@ function crossCheck(merged: {
 // ---------------------------------------------------------------------------
 // Shapes returned to the dashboard
 
-const ACTION_LABELS: Record<string, string> = { ig_comment: 'Instagram comment', ig_story: 'Instagram Story mention', manual: 'Manual' };
+const ACTION_LABELS: Record<string, string> = {
+  ig_comment: 'Instagram comment',
+  ig_story: 'Instagram Story mention',
+  ig_tag: 'Instagram post tagging us',
+  manual: 'Manual',
+};
 
 const fmt = (d: Date) =>
   d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -142,6 +154,7 @@ export function describeRule(r: Rule) {
   if (r.frequency) parts.push(`, 1 per ${r.frequency}`);
   if (r.windowStart || r.windowEnd) parts.push(`, ${r.windowStart ? fmt(r.windowStart) : 'start'}–${r.windowEnd ? fmt(r.windowEnd) : 'end'}`);
   if (r.options.requireTag) parts.push(', must tag a friend');
+  if (r.options.captionIncludes) parts.push(`, caption includes "${r.options.captionIncludes}"`);
   return `#${r.position} ${parts.join('')})`;
 }
 
@@ -247,6 +260,7 @@ export function createAdminRouter(client?: Client) {
           name: input.name,
           startsAt: input.startsAt,
           endsAt: input.endsAt,
+          entryMethod: input.entryMethod ?? 'discord',
           entryChannel: input.entryChannel ?? null,
           igMediaId: igPost?.id ?? null,
           igPostedAt: igPost ? new Date(igPost.postedAt) : null,
@@ -297,6 +311,7 @@ export function createAdminRouter(client?: Client) {
     const currentRules = await getRules(g.id);
 
     const merged = {
+      entryMethod: input.entryMethod ?? g.entryMethod,
       startsAt: input.startsAt ?? g.startsAt,
       endsAt: input.endsAt ?? g.endsAt,
       formFields: input.formFields ?? g.formFields,
@@ -389,7 +404,7 @@ export function createAdminRouter(client?: Client) {
   // "Sync now": read the post's comments immediately and return the result.
   router.post('/giveaways/:id/sync', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
-    if (!g.igMediaId) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post first' });
+    if (!g.igMediaId && !(await hasTagRules(g))) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post (or add a tagged-post rule) first' });
     await runCommentSync(g, 'manual');
     res.json({ igSync: await getSyncStatus(g.id) });
   });
@@ -418,7 +433,8 @@ export function createAdminRouter(client?: Client) {
     const { entrants, unmatched } = await entrantReport(g.id);
     const members = await serverMemberIds(client);
     res.json({
-      entrants: entrants.map(e => ({ ...e, inServer: members ? members.has(e.discordId) : null })),
+      // inServer is null for Instagram-only entrants (no Discord account) or when the bot is offline.
+      entrants: entrants.map(e => ({ ...e, inServer: members && e.discordId ? members.has(e.discordId) : null })),
       unmatched,
     });
   });
@@ -544,8 +560,9 @@ export function createAdminRouter(client?: Client) {
     const rules = await getRules(g.id);
     const { entrants } = await entrantReport(g.id);
     const members = await serverMemberIds(client);
-    const inServer = (id: string) => (members ? members.has(id) : '');
-    const eligible = entrants.filter(e => !e.revokedAt && (!members || members.has(e.discordId)));
+    const inServer = (id: string | null) => (members && id ? members.has(id) : '');
+    // Discord entrants must still be in the server; Instagram-only entrants have no server to be in.
+    const eligible = entrants.filter(e => !e.revokedAt && (!members || !e.discordId || members.has(e.discordId)));
     const ruleName = (ruleId: number | null, action: string | null, label: string | null) => {
       const r = rules.find(x => x.id === ruleId);
       return r ? describeRule(r) : action === 'manual' ? `Manual: ${label ?? ''}` : `${ACTION_LABELS[action ?? ''] ?? action} (removed rule)`;
