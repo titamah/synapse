@@ -36,7 +36,7 @@ export function countdownEmbed(g: Giveaway, hoursLeft?: number) {
 
 export function milestoneEmbed(g: Giveaway, entrants: number) {
   return base(g)
-    .setTitle(`🎯 ${entrants} entrants in ${g.name}!`)
+    .setTitle(`🎯 ${entrants} entrant${entrants === 1 ? "" : "s"} in ${g.name}!`)
     .setDescription([`Ends ${ts(g.endsAt, 'R')}.`, enterLine(g)].join('\n'));
 }
 

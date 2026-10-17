@@ -9,7 +9,7 @@ import {
   TextInputStyle,
 } from 'discord.js';
 import type { FormField } from '../db/schema.js';
-import { getEntrantByDiscord, getGiveaway, getOpenGiveaway, submitEntry, type Entrant } from './service.js';
+import { getEntrantByDiscord, getGiveaway, getOpenGiveaway, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 const MODAL_PREFIX = 'giveaway:enter:';
@@ -62,6 +62,14 @@ export async function showEntryModal(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  // No questions to ask (e.g. a Discord-only giveaway): enter right away, no form.
+  if (!g.formFields.length) {
+    await interaction.deferReply({ flags: ephemeral });
+    const result = await submitEntry({ giveaway: g, discordId: interaction.user.id, discordUsername: interaction.user.username, values: {} });
+    await interaction.editReply(entryReply(g, result));
+    return;
+  }
+
   const existing = await getEntrantByDiscord(g.id, interaction.user.id);
   const title = `${existing ? 'Update' : 'Enter'}: ${g.name ?? 'Giveaway'}`;
   const modal = new ModalBuilder()
@@ -101,29 +109,27 @@ export async function handleGiveawayModal(interaction: ModalSubmitInteraction) {
     values,
   });
 
-  // Entrants only ever learn that their entry was captured or updated.
+  await interaction.editReply(entryReply(g, result));
+}
+
+/** Entrants only ever learn that their entry was captured or updated. */
+function entryReply(g: Giveaway, result: EntryResult): string {
   const reminder = g.reminderText ? `\n${g.reminderText}` : '';
   switch (result.status) {
     case 'created':
     case 'unchanged':
-      await interaction.editReply(`✅ Entry captured!${reminder}`);
-      return;
+      return `✅ Entry captured!${reminder}`;
     case 'updated':
-      await interaction.editReply(`✅ Entry updated!${reminder}`);
-      return;
+      return `✅ Entry updated!${reminder}`;
     case 'invalid':
-      await interaction.editReply(
-        result.field.type === 'ig_username'
-          ? "❌ That doesn't look like an Instagram username. Use only letters, numbers, periods and underscores (up to 30 characters)."
-          : `❌ Please check "${result.field.label}" and try again.`,
-      );
-      return;
+      return result.field.type === 'ig_username'
+        ? "❌ That doesn't look like an Instagram username. Use only letters, numbers, periods and underscores (up to 30 characters)."
+        : `❌ Please check "${result.field.label}" and try again.`;
     case 'closed':
     case 'full':
-      await interaction.editReply('⏰ This giveaway is closed. Thanks for playing!');
-      return;
+      return '⏰ This giveaway is closed. Thanks for playing!';
     case 'revoked':
     case 'conflict':
-      await interaction.editReply(CONTACT_ADMIN);
+      return CONTACT_ADMIN;
   }
 }
