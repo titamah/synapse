@@ -46,8 +46,15 @@ export const giveaways = pgTable('giveaways', {
   maxParticipants: integer('max_participants'),
   announcements: jsonb('announcements').$type<AnnouncementSettings>().notNull().default({ enabled: true }),
   testMode: boolean('test_mode').notNull().default(false),
-  winnerNotify: text('winner_notify').notNull().default('manual'),
+  // Winners: how many, how they're picked (auto = random weighted by entries, manual = admins pick)
+  // and notified (auto = DM with Accept/Decline after a delay, manual = admins reach out and report).
+  winnerCount: integer('winner_count').notNull().default(1),
+  winnerSelect: text('winner_select').$type<'auto' | 'manual'>().notNull().default('manual'),
+  winnerNotify: text('winner_notify').$type<'auto' | 'manual'>().notNull().default('manual'),
+  notifyDelayMinutes: integer('notify_delay_minutes').notNull().default(30),
+  winnerMessage: text('winner_message'),
   claimHours: integer('claim_hours').notNull().default(12),
+  // Legacy single-winner columns, superseded by the winners table.
   winnerEntrantId: integer('winner_entrant_id'),
   winnerRecordedBy: text('winner_recorded_by'),
   winnerRecordedAt: timestamp('winner_recorded_at', { withTimezone: true }),
@@ -142,6 +149,36 @@ export const bonuses = pgTable(
     uniqueIndex('bonuses_giveaway_action_ref_uq').on(t.giveawayId, t.action, t.sourceRef),
     index('bonuses_giveaway_ig_idx').on(t.giveawayId, t.igUsername),
   ],
+);
+
+export type WinnerStatus = 'pending' | 'notified' | 'unreachable' | 'accepted' | 'declined' | 'expired';
+
+/**
+ * Every winner picked, in order, with what happened. Declined and expired winners stay
+ * here (their entries are disqualified) so the history shows the whole story.
+ *   pending → (DM sent) notified → accepted | declined | expired
+ *   pending → (DM failed) unreachable → accepted | declined   (admins report)
+ *   pending (manual notify) → accepted | declined             (admins report)
+ */
+export const winners = pgTable(
+  'winners',
+  {
+    id: serial('id').primaryKey(),
+    giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+    entrantId: integer('entrant_id').notNull().references(() => entrants.id, { onDelete: 'cascade' }),
+    status: text('status').$type<WinnerStatus>().notNull().default('pending'),
+    selectedBy: text('selected_by').notNull(),
+    entriesAtDraw: integer('entries_at_draw').notNull(),
+    notifyAt: timestamp('notify_at', { withTimezone: true }),
+    notifiedAt: timestamp('notified_at', { withTimezone: true }),
+    claimDeadline: timestamp('claim_deadline', { withTimezone: true }),
+    respondedAt: timestamp('responded_at', { withTimezone: true }),
+    outcomeBy: text('outcome_by'),
+    dmChannelId: text('dm_channel_id'),
+    dmMessageId: text('dm_message_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  t => [index('winners_giveaway_idx').on(t.giveawayId), uniqueIndex('winners_giveaway_entrant_uq').on(t.giveawayId, t.entrantId)],
 );
 
 /** Discord alerts already sent, so restarts never repeat one. */

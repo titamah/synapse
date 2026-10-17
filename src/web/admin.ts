@@ -7,9 +7,12 @@ import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
 import { giveawayRules, giveaways } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
+import { serverMemberIds } from '../discord/members.js';
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
 import { announceExtended } from '../giveaway/announcements.js';
+import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
+import { drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
 import { resolveAnnouncements } from '../giveaway/announcementRules.js';
 import type { Rule } from '../giveaway/rules.js';
 import {
@@ -24,7 +27,6 @@ import {
   getGiveaway,
   getRules,
   listGiveaways,
-  recordWinner,
   revokeBonus,
   setEntrantRevoked,
   slugify,
@@ -92,7 +94,13 @@ const giveawayFields = {
     }),
   ),
   testMode: unset(z.boolean()),
+  // Winners
+  winnerCount: unset(z.number().int().min(1).max(100)),
+  winnerSelect: unset(z.enum(['manual', 'auto'])),
   winnerNotify: unset(z.enum(['manual', 'auto'])),
+  notifyDelayMinutes: unset(z.number().int().min(0).max(7 * 24 * 60)),
+  // DM text with {name}, {giveaway}, {deadline}. null = use the default message.
+  winnerMessage: z.string().max(1500).nullish(),
   claimHours: unset(z.number().int().min(1).max(720)),
 };
 
@@ -146,6 +154,8 @@ async function giveawayJson(g: Giveaway) {
     rules: rules.map(r => ({ ...r, description: describeRule(r) })),
     // Effective update settings with defaults filled in, for the dashboard's toggles.
     announcements: resolveAnnouncements(g.announcements),
+    defaultWinnerMessage: DEFAULT_WINNER_MESSAGE,
+    winners: await listWinners(g.id),
     // Last Instagram comment read: show a warning when lastError is set.
     igSync: await getSyncStatus(g.id),
   };
@@ -357,7 +367,8 @@ export function createAdminRouter(client?: Client) {
   router.delete('/giveaways/:id', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
     if (statusOf(g) === 'open') return void res.status(409).json({ error: 'Close this giveaway before deleting it.' });
-    const entrantsSoFar = await entrantCount(g.id);
+    // Everyone gets deleted, disqualified entrants included, so count them all.
+    const entrantsSoFar = (await entrantReport(g.id)).entrants.length;
     const confirm = typeof req.query.confirm === 'string' ? req.query.confirm.trim() : '';
     // Every delete needs the exact name typed, except test-mode giveaways.
     if (!g.testMode && confirm !== (g.name ?? g.slug)) {
@@ -401,7 +412,7 @@ export function createAdminRouter(client?: Client) {
   router.get('/giveaways/:id/entrants', async (req: Req, res) => {
     const g = req.giveaway!;
     const { entrants, unmatched } = await entrantReport(g.id);
-    const members = await serverMembers(client);
+    const members = await serverMemberIds(client);
     res.json({
       entrants: entrants.map(e => ({ ...e, inServer: members ? members.has(e.discordId) : null })),
       unmatched,
@@ -437,12 +448,64 @@ export function createAdminRouter(client?: Client) {
     res.json(e);
   });
 
-  router.post('/giveaways/:id/winner', requireActor, async (req: Req, res) => {
+  // ----- Winners
+
+  router.get('/giveaways/:id/winners', async (req: Req, res) => {
+    const g = req.giveaway!;
+    const { entrants } = await entrantReport(g.id);
+    const byId = new Map(entrants.map(e => [e.id, e]));
+    res.json((await listWinners(g.id)).map(w => ({ ...w, entrant: byId.get(w.entrantId) ?? null })));
+  });
+
+  /** Checks shared by picking and drawing: the giveaway is closed and a winner slot is open. */
+  async function canSelect(g: Giveaway) {
+    if (statusOf(g) !== 'closed') return 'Winners can be picked once the giveaway is closed.';
+    if (!openSlots(g.winnerCount, (await listWinners(g.id)).map(w => w.status))) return `All ${g.winnerCount} winner slot(s) are filled. Resolve a winner first, or raise winnerCount.`;
+    return null;
+  }
+
+  // Manual pick from the entrants list.
+  router.post('/giveaways/:id/winners', requireActor, async (req: Req, res) => {
+    const g = req.giveaway!;
     const body = z.object({ entrantId: z.number().int() }).safeParse(req.body);
     if (!body.success) return void res.status(400).json({ error: 'entrantId is required' });
-    const winner = await recordWinner(req.giveaway!.id, body.data.entrantId, req.actor!);
-    if (!winner) return void res.status(404).json({ error: 'Entrant not found' });
-    res.json({ winner });
+    const problem = await canSelect(g);
+    if (problem) return void res.status(409).json({ error: problem });
+    const pick = (await eligiblePool(g, client)).find(p => p.entrant.id === body.data.entrantId);
+    if (!pick) return void res.status(400).json({ error: "That entrant can't win: disqualified, left the server, or already picked." });
+    const w = await selectWinner(client, g, pick.entrant, req.actor!);
+    res.status(201).json(w);
+  });
+
+  // "Draw at random" (weighted by entries), for manual-select giveaways that want a random pick.
+  router.post('/giveaways/:id/winners/draw', requireActor, async (req: Req, res) => {
+    const g = req.giveaway!;
+    const problem = await canSelect(g);
+    if (problem) return void res.status(409).json({ error: problem });
+    const w = await drawWinner(client, g, req.actor!);
+    if (!w) return void res.status(409).json({ error: 'No eligible entrants left to draw.' });
+    res.status(201).json(w);
+  });
+
+  // "Notify now": send the winner's DM without waiting for the delay.
+  router.post('/giveaways/:id/winners/:winnerId/notify', requireActor, async (req: Req, res) => {
+    if (!client?.isReady()) return void res.status(503).json({ error: 'The bot is not connected to Discord right now.' });
+    const w = (await listWinners(req.giveaway!.id)).find(x => x.id === Number(req.params.winnerId));
+    if (!w) return void res.status(404).json({ error: 'Winner not found' });
+    const result = await notifyWinner(client, w.id, req.actor!);
+    if (!result.ok) return void res.status(409).json({ error: result.error });
+    res.json({ notified: true });
+  });
+
+  // Manual notify (or DMs closed): admins report what the winner said.
+  router.post('/giveaways/:id/winners/:winnerId/outcome', requireActor, async (req: Req, res) => {
+    const body = z.object({ outcome: z.enum(['accepted', 'declined']) }).safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: 'outcome must be "accepted" or "declined"' });
+    const w = (await listWinners(req.giveaway!.id)).find(x => x.id === Number(req.params.winnerId));
+    if (!w) return void res.status(404).json({ error: 'Winner not found' });
+    const result = await resolveWinner(client, w.id, body.data.outcome, req.actor!);
+    if (!result.ok) return void res.status(409).json({ error: result.error });
+    res.json(result.winner);
   });
 
   router.get('/giveaways/:id/audit', async (req: Req, res) => {
@@ -463,7 +526,7 @@ export function createAdminRouter(client?: Client) {
 
     const rules = await getRules(g.id);
     const { entrants } = await entrantReport(g.id);
-    const members = await serverMembers(client);
+    const members = await serverMemberIds(client);
     const inServer = (id: string) => (members ? members.has(id) : '');
     const eligible = entrants.filter(e => !e.revokedAt && (!members || members.has(e.discordId)));
     const ruleName = (ruleId: number | null, action: string | null, label: string | null) => {
@@ -502,15 +565,4 @@ export function createAdminRouter(client?: Client) {
   });
 
   return router;
-}
-
-// Server members, cached briefly so exports and tables don't refetch on every request.
-let membersCache: { at: number; ids: Set<string> } | undefined;
-async function serverMembers(client?: Client): Promise<Set<string> | null> {
-  if (!client?.isReady()) return null;
-  if (membersCache && Date.now() - membersCache.at < 60_000) return membersCache.ids;
-  const guild = await client.guilds.fetch(env.SERVER_ID);
-  const members = await guild.members.fetch();
-  membersCache = { at: Date.now(), ids: new Set(members.keys()) };
-  return membersCache.ids;
 }

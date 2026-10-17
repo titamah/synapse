@@ -23,7 +23,7 @@ const STALE_MS = 2 * 60 * 60 * 1000;
  * so restarts and overlapping runs never double-post; `alsoMark` marks skipped keys as handled
  * (e.g. the 3-day countdown when the 24-hour one is the one worth posting).
  */
-async function postOnce(client: Client, g: Giveaway, key: string, message: MessageCreateOptions, alsoMark: string[] = []) {
+export async function postOnce(client: Client, g: Giveaway, key: string, message: MessageCreateOptions, alsoMark: string[] = []) {
   const claimed = await db
     .insert(announcementsSent)
     .values({ giveawayId: g.id, kind: key.split(':')[0]!, key })

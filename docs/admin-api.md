@@ -42,8 +42,14 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
     "countdown":  { "enabled": true, "hours": [336, 72, 24, 5] }   // live countdown + [Extend]
   },
   "testMode": false,                               // true = never posts updates, and can be deleted without confirming
-  "winnerNotify": "manual" | "auto", "claimHours": 12,
-  "winnerEntrantId": null, "winnerRecordedBy": null, "winnerRecordedAt": null,
+  "winnerCount": 1,
+  "winnerSelect": "auto" | "manual",              // auto = bot draws at close (weighted by entries); manual = admins pick
+  "winnerNotify": "auto" | "manual",              // auto = DM with Accept/Decline; manual = admins reach out and report
+  "notifyDelayMinutes": 30,                        // auto notify waits this long after a pick ([Notify now] skips it)
+  "winnerMessage": null,                           // DM text with {name}, {giveaway}, {deadline}; null = default
+  "defaultWinnerMessage": "🎉 Congrats {name}! …", // read-only, for the dashboard's placeholder
+  "claimHours": 12,                                // claim window, starts when the DM is sent
+  "winners": [ /* Winner, in pick order */ ],
   "entrantCount": 0,
   "rules": [ /* Rule, with a readable "description" */ ]
 }
@@ -88,7 +94,6 @@ An action counts under the **most specific** rule (narrowest window) that still 
 | DELETE | `/giveaways/:id/bonuses/:bonusId` | `{ reason? }` | `Bonus` (removed) |
 | POST | `/giveaways/:id/entrants/:entrantId/disqualify` | `{ reason }` | `Entrant` |
 | POST | `/giveaways/:id/entrants/:entrantId/restore` | — | `Entrant` |
-| POST | `/giveaways/:id/winner` | `{ entrantId }` | `{ winner: Entrant }` |
 | GET | `/giveaways/:id/audit` | — | Audit rows, newest first |
 | GET | `/giveaways/:id/export/entries.csv` | — | One row **per entry** (for the spinner). Excludes disqualified people and people who left the server. |
 | GET | `/giveaways/:id/export/entrants.csv` | — | One row **per person**: form answers, entries per rule, totals |
@@ -107,7 +112,27 @@ Set the giveaway's post with **`igPost`** on create or edit: a post link (`https
 | GET | `/instagram/resolve?url=<link>` | The post for a link (preview before saving), or `404` |
 | POST | `/giveaways/:id/sync` | "Sync now": reads comments immediately, returns `{ igSync }` |
 
-**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `igPost`, `entryChannel`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
+### Winners
+```jsonc
+{ "id": 3, "entrantId": 12, "selectedBy": "auto" | "admin:you@…",
+  "status": "pending" | "notified" | "unreachable" | "accepted" | "declined" | "expired",
+  "entriesAtDraw": 3, "notifyAt": "…", "notifiedAt": "…", "claimDeadline": "…", "respondedAt": "…", "outcomeBy": "…" }
+```
+- **pending:** picked, DM not sent yet (auto notify) or waiting for admins to report (manual notify).
+- **notified:** DM sent; **unreachable:** their DMs are closed, so admins reach out and report.
+- **declined / expired:** stays in the history, and **all their entries are disqualified**. The slot is refilled: auto-select draws again (with the notify delay), manual-select asks admins to pick.
+- Winners can only be picked after the giveaway closes. Disqualified people, people who left the server, and anyone already picked can't be picked.
+- Everything is also posted in #community-updates, with buttons: [Notify now], or [Accepted] / [Declined].
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/giveaways/:id/winners` | — | Winners with their `entrant` |
+| POST | `/giveaways/:id/winners` | `{ entrantId }` | `201 Winner` (manual pick) · `409` if open or all slots filled · `400` if not eligible |
+| POST | `/giveaways/:id/winners/draw` | — | `201 Winner` (random, weighted by entries) · `409` if nobody's left |
+| POST | `/giveaways/:id/winners/:winnerId/notify` | — | Sends the DM now · `503` if the bot is offline |
+| POST | `/giveaways/:id/winners/:winnerId/outcome` | `{ outcome: "accepted" \| "declined" }` | Updated `Winner` |
+
+**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `igPost`, `entryChannel`, `winnerCount`, `winnerSelect`, `notifyDelayMinutes`, `winnerMessage`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
 
 **PATCH rules:** send the **full list** in the order you want. Include `id` for existing rules, omit it for new ones; rules you leave out are deleted. Entries already earned under a deleted rule are kept.
 

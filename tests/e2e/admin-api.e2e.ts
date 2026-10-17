@@ -169,10 +169,28 @@ ok('entrants.csv has form answer + rule columns', /What do you play on\?/.test(e
 const auditCsv = await api('GET', `/giveaways/${gid}/export/audit.csv`);
 ok('audit.csv records the admin email', /admin:tester@bostonblerds\.com/.test(auditCsv.text));
 
-const winner = await api('POST', `/giveaways/${gid}/winner`, { entrantId: alex.id });
-ok('record winner', winner.status === 200 && winner.json.winner.discordUsername === 'alex', winner.json);
+ok('pick a winner while open → 409', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: alex.id })).status === 409);
 const closed = await api('POST', `/giveaways/${gid}/close`);
 ok('close early → closed', closed.status === 200 && closed.json.status === 'closed', closed.json);
+
+// Winners (no Discord connection in tests, so nothing is posted or DMed).
+const pick = await api('POST', `/giveaways/${gid}/winners`, { entrantId: alex.id });
+ok('manual pick → 201 pending', pick.status === 201 && pick.json.status === 'pending' && pick.json.entriesAtDraw === 8, pick.json);
+ok('second pick with 1 slot → 409', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: sam.id })).status === 409);
+ok('notify without Discord → 503', (await api('POST', `/giveaways/${gid}/winners/${pick.json.id}/notify`)).status === 503);
+const declined = await api('POST', `/giveaways/${gid}/winners/${pick.json.id}/outcome`, { outcome: 'declined' });
+ok('report declined → winner kept as declined', declined.status === 200 && declined.json.status === 'declined', declined.json);
+ents = await api('GET', `/giveaways/${gid}/entrants`);
+ok('declined winner is disqualified', ents.json.entrants.find((e: any) => e.id === alex.id).totalEntries === 0);
+ok('cannot pick a disqualified entrant', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: alex.id })).status === 400);
+const drawn = await api('POST', `/giveaways/${gid}/winners/draw`);
+ok('draw → the only eligible entrant (sam)', drawn.status === 201 && drawn.json.entrantId === sam.id, drawn.json);
+const accepted = await api('POST', `/giveaways/${gid}/winners/${drawn.json.id}/outcome`, { outcome: 'accepted' });
+ok('report accepted', accepted.status === 200 && accepted.json.status === 'accepted', accepted.json);
+const history = await api('GET', `/giveaways/${gid}/winners`);
+ok('winner history: declined then accepted', history.json.map((w: any) => w.status).join(',') === 'declined,accepted' && history.json[1].entrant.discordUsername === 'sam', history.json);
+ok('draw with no slot left → 409', (await api('POST', `/giveaways/${gid}/winners/draw`)).status === 409);
+
 ok('no open giveaway after close', (await svc.getOpenGiveaway()) === null);
 ok('story after close earns nothing', (await award('ig_story', 'sam_ig', 'late1')) === 'no-rule');
 

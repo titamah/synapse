@@ -7,6 +7,8 @@ import { pool, runMigrations } from './db/client.js';
 import { handleExtendButton, handleExtendModal, isExtendModal } from './discord/extend.js';
 import { POST_TO_CHANNEL, handlePostToChannel } from './discord/postToChannel.js';
 import { syncCommands } from './discord/registerCommands.js';
+import { handleWinnerButton } from './discord/winnerButtons.js';
+import { WINNER_BUTTON, runWinnerJobs } from './giveaway/winners.js';
 import { runAnnouncements } from './giveaway/announcements.js';
 import { EXTEND_BUTTON_PREFIX } from './giveaway/embeds.js';
 import { handleGiveawayModal } from './giveaway/interactions.js';
@@ -63,6 +65,11 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
 
+    if (interaction.isButton() && WINNER_BUTTON.test(interaction.customId)) {
+      await handleWinnerButton(interaction);
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith(EXTEND_BUTTON_PREFIX)) {
       await handleExtendButton(interaction);
       return;
@@ -105,12 +112,14 @@ async function runInstagramJob() {
 }
 let instagramJob: NodeJS.Timeout | undefined;
 
-// Every minute: post due updates to #community-updates, and show/hide /giveaway as giveaways open and close.
+// Every minute: post due updates to #community-updates, show/hide /giveaway as giveaways open and
+// close, and move winners along (draws, DMs, expired claim windows).
 const MINUTE_JOB_MS = 60 * 1000;
 const minuteJob = setInterval(() => {
   if (!client.isReady()) return;
   void runAnnouncements(client).catch(err => console.error('Updates job failed:', err));
   void syncCommands(client).catch(err => console.error('Command sync failed:', err));
+  void runWinnerJobs(client);
 }, MINUTE_JOB_MS);
 if (env.IG_ACCESS_TOKEN) {
   void runInstagramJob();
