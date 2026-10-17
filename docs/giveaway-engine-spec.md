@@ -1,6 +1,6 @@
 # Giveaway Engine — Spec
 
-**Status:** Draft v1 · **Owner:** Boston Blerds · **Replaces:** the hardcoded GTA VI setup in `src/giveaway/service.ts`
+**Status:** Draft v2 · **Owner:** Boston Blerds · **Replaces:** the hardcoded GTA VI setup in `src/giveaway/service.ts`
 
 Run any giveaway from the admin dashboard: set the dates, the entry form and the rules, then click **Create**. BB-Bot collects entries and bonuses into Synapse. Admins decide eligibility and pick the winner; the engine only **collects and exports data**.
 
@@ -44,7 +44,7 @@ scheduled ──(start time)──► open ──(end time / closed early)──
 | Instagram hashtag | `#BBxGTAVI`. Required if any Instagram rule exists. |
 | Entry form | Up to **5 fields** (§3a) |
 | Rules | §5 |
-| Max participants | Optional (open question, §11) |
+| Max participants | Optional. When reached, the giveaway **closes automatically**. |
 | Announcements | On/off per alert type, milestone size, countdown points (§7) |
 | Test mode | Creates a giveaway that **posts no announcements**, for trying things out |
 
@@ -54,7 +54,7 @@ scheduled ──(start time)──► open ──(end time / closed early)──
 - Field types: short text, long text, dropdown (e.g. PS5 / Xbox / PC), checkbox. Each can be required or optional.
 - **Instagram username** is a built-in field type with validation and normalization. It is **required whenever an Instagram rule exists**, because it's how comments and Story mentions are matched to people.
 - Running `/giveaway enter` again opens the form pre-filled so people can edit their answers until the giveaway closes.
-- The bot's only replies to entrants: "captured" / "updated", plus a configurable reminder line (e.g. "Don't forget to follow @BostonBlerds!").
+- The bot's only replies to entrants: "captured" / "updated", plus a configurable reminder line. The line supports Discord formatting, including links as `[text](url)`, e.g. `Don't forget to follow [@BostonBlerds](https://instagram.com/bostonblerds)!`
 
 ---
 
@@ -64,11 +64,9 @@ scheduled ──(start time)──► open ──(end time / closed early)──
 |---|---|---|
 | **Instagram comment** on the giveaway post | Instagram webhook + 10-minute sync | "Must tag a friend" (an @mention other than BB or the commenter) |
 | **Instagram Story mention** of @BostonBlerds | Instagram `messages` webhook | — |
-| **Manual** | An admin adds it from the dashboard | Label, e.g. "Attended Retro Gaming Night" |
+| **Manual** | An admin adds it to a person from the dashboard | Label, e.g. "Attended Retro Gaming Night". Logged with who added it and when. |
 
-- The **base entry** (`/giveaway enter`) is always on and always worth 1.
-- **IG follows** can't be detected. They're a stated requirement that admins check by hand for the winner only.
-- Adding a new action type (e.g. "reacted to a Discord post") requires code once; then it's in the menu for every future giveaway.
+The **base entry** (`/giveaway enter`) is always on and always worth 1.
 
 ---
 
@@ -83,7 +81,7 @@ Every bonus is a rule built from the same pieces:
 | Action | From §4 |
 | Max counted | How many times this rule can award an entry to one person |
 | Time window | Only counts between these times (default: the whole giveaway) |
-| Frequency | At most once per day / week / N minutes |
+| Frequency | At most once per day / week |
 | Options | Action-specific, e.g. "must tag a friend" |
 
 **How an action is counted:** find every rule it fits, and count it under the **most specific** rule that still has room (narrowest time window first, in order of the rules list after that). If none has room, it's recorded but earns nothing.
@@ -91,7 +89,7 @@ Every bonus is a rule built from the same pieces:
 **Example: GTA VI**
 | # | Action | Max | Window | Frequency | Options |
 |---|---|---|---|---|---|
-| 1 | Story mention | 5 | Nov 20, event hours (TBD) | 1 per 10 min (TBD) | — |
+| 1 | Story mention | 5 | Nov 20, event hours (set in dashboard) | — | — |
 | 2 | Story mention | 1 | whole giveaway | — | — |
 | 3 | Comment | 1 | whole giveaway | — | must tag a friend |
 
@@ -118,14 +116,23 @@ All bot alerts go to **`#community-updates`** (admin-only) first.
 |---|---|
 | Giveaway started | At start time |
 | Milestone | Every N entries (e.g. 100) |
-| Countdown | Configurable, e.g. 14 days, 3 days, 24 hours left |
-| Extended | End time moved |
-| Closed | At end time, or closed early |
+| Capacity | If there's a participant cap: 50%, 75%, 90%, 95%. At **99%**, includes **[Extend]** to raise the cap. |
+| Countdown | Configurable, e.g. 14 days, 3 days, 24 hours left. **5 hours left** includes a live countdown and **[Extend]**. |
+| Extended | End time or cap changed |
+| Closed | At end time, cap reached, or closed early |
 | **Who won?** | After close, with a **[Record winner]** button: an admin picks the member, saved to the giveaway's history |
 
 - **Post publicly:** right-click any alert → **Apps → "Post to giveaway channel"** reposts it as a rich embed in the entry channel.
-- **Buttons on alerts:** e.g. "Ends in 24h" → **[Extend]**. (Details TBD.)
+- **Live countdowns** use Discord's built-in relative timestamps ("ends in 4 hours"), which tick down on their own in every member's app with no message editing.
+- **[Extend]** opens a small form: new end time or new cap.
 - Alerts never repeat after a bot restart. Each alert is recorded once sent.
+
+### Winner notification
+Configurable per giveaway:
+- **Manual:** admins reach out themselves. The bot only records the winner.
+- **Automatic:** recording the winner DMs them a congratulations embed with the claim deadline (e.g. 12 hours, configurable), and the bot posts a reminder in `#community-updates` when the deadline passes.
+
+Embed and message designs to be finalized with Boston Blerds.
 
 ---
 
@@ -173,13 +180,11 @@ GET    /admin/giveaways/:id/export/{entries|entrants|audit}.csv
 
 ---
 
-## 11. Open questions
-
-1. **Event hours** for Retro Gaming Night (must end by 10:30 PM, when entries close).
-2. **10-minute spacing** between counted event Stories: yes or no?
-3. **Max participants:** if a cap is reached before the end, close automatically, or stay open and reply "full"? Or skip caps for now?
-4. **Alert buttons:** which alerts get buttons, and what they do beyond [Extend].
-5. **Winner DM:** should recording a winner also DM them automatically (with the 12-hour claim window)?
+## 11. Decided
+- Event hours are set by admins as a rule's time window (GTA VI's will be entered through the new dashboard as the first real test).
+- No minimum spacing between counted actions.
+- Participant cap reached → giveaway closes automatically.
+- Winner notification: configurable, manual or automatic.
 
 ## Out of scope (for now)
 Spinner / remote display app, member-facing pages, Posh, Discord Scheduled Events, XP.
