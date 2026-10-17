@@ -10,9 +10,19 @@ export type FormField = {
   options?: string[] | undefined;
 };
 
+/** Which Discord updates a giveaway posts in #community-updates. Missing values use the defaults. */
 export type AnnouncementSettings = {
-  enabled: boolean;
+  /** Master switch. Test-mode giveaways never post, whatever this says. */
+  enabled?: boolean | undefined;
+  started?: boolean | undefined;
+  closed?: boolean | undefined;
+  extended?: boolean | undefined;
+  milestones?: { enabled: boolean; every: number } | undefined;
+  capacity?: { enabled: boolean; percents: number[] } | undefined;
+  countdown?: { enabled: boolean; hours: number[] } | undefined;
+  /** @deprecated v1 shape, still read for old rows. */
   milestoneEvery?: number | undefined;
+  /** @deprecated v1 shape, still read for old rows. */
   countdownHours?: number[] | undefined;
 };
 

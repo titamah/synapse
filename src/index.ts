@@ -1,9 +1,14 @@
-import { Client, Collection, Events, GatewayIntentBits, MessageFlags, REST, Routes, type Interaction } from 'discord.js';
+import { Client, Collection, Events, GatewayIntentBits, MessageFlags, type Interaction } from 'discord.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { env } from './config/environment.js';
 import { pool, runMigrations } from './db/client.js';
+import { handleExtendButton, handleExtendModal, isExtendModal } from './discord/extend.js';
+import { POST_TO_CHANNEL, handlePostToChannel } from './discord/postToChannel.js';
+import { syncCommands } from './discord/registerCommands.js';
+import { runAnnouncements } from './giveaway/announcements.js';
+import { EXTEND_BUTTON_PREFIX } from './giveaway/embeds.js';
 import { handleGiveawayModal } from './giveaway/interactions.js';
 import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
@@ -53,8 +58,19 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
 
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('giveaway:')) {
-      await handleGiveawayModal(interaction);
+    if (interaction.isMessageContextMenuCommand() && interaction.commandName === POST_TO_CHANNEL) {
+      await handlePostToChannel(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith(EXTEND_BUTTON_PREFIX)) {
+      await handleExtendButton(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (isExtendModal(interaction.customId)) await handleExtendModal(interaction);
+      else if (interaction.customId.startsWith('giveaway:')) await handleGiveawayModal(interaction);
     }
   } catch (err) {
     console.error(err);
@@ -72,21 +88,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 client.once(Events.ClientReady, async readyClient => {
   console.log(`Logged in as ${readyClient.user.tag}`);
 
-  // Registering on every boot keeps Discord in sync with the code; guild commands update instantly.
-  const rest = new REST({ version: '10' }).setToken(env.DISCORD_TOKEN);
-  try {
-    await rest.put(Routes.applicationGuildCommands(env.CLIENT_ID, env.SERVER_ID), {
-      body: client.commands.map(c => c.data.toJSON()),
-    });
-    console.log(`Registered ${client.commands.size} commands`);
-  } catch (err) {
-    // Keep running (webhooks, the admin API and jobs don't need slash commands).
-    const e = err as { code?: number; message?: string };
-    console.error(
-      `Could not register slash commands: ${e.message ?? err}` +
-        (e.code === 50001 ? ' — re-invite the bot with the "applications.commands" scope.' : ''),
-    );
-  }
+  await syncCommands(readyClient, true);
 });
 
 // Instagram, every 30 minutes: re-read the giveaway post's comments (catches anything a webhook
@@ -102,6 +104,14 @@ async function runInstagramJob() {
   }
 }
 let instagramJob: NodeJS.Timeout | undefined;
+
+// Every minute: post due updates to #community-updates, and show/hide /giveaway as giveaways open and close.
+const MINUTE_JOB_MS = 60 * 1000;
+const minuteJob = setInterval(() => {
+  if (!client.isReady()) return;
+  void runAnnouncements(client).catch(err => console.error('Updates job failed:', err));
+  void syncCommands(client).catch(err => console.error('Command sync failed:', err));
+}, MINUTE_JOB_MS);
 if (env.IG_ACCESS_TOKEN) {
   void runInstagramJob();
   instagramJob = setInterval(runInstagramJob, INSTAGRAM_JOB_MS);
@@ -110,6 +120,7 @@ if (env.IG_ACCESS_TOKEN) {
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
   clearInterval(instagramJob);
+  clearInterval(minuteJob);
   webServer.close();
   await client.destroy();
   await pool.end();

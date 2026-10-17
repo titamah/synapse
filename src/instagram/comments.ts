@@ -1,5 +1,5 @@
 import { OWN_IG_HANDLE, awardAction, countedCommentBonuses, normalizeIg, revokeBonus, type Giveaway } from '../giveaway/service.js';
-import { findGiveawayPost, getAllComments } from './api.js';
+import { getAllComments, knownGiveawayPost } from './api.js';
 
 /** "Tag a friend": the comment @mentions someone other than us or the commenter. */
 export function tagsAFriend(username: string, text: string): boolean {
@@ -37,7 +37,7 @@ export async function processComment(
  * partway, it throws and nothing is changed.
  */
 export async function syncComments(g: Giveaway) {
-  const post = await findGiveawayPost(g);
+  const post = knownGiveawayPost(g);
   if (!post) return null;
 
   const all = await getAllComments(post.id);

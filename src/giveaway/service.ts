@@ -95,6 +95,39 @@ export async function closeGiveaway(id: number, actorId: string, reason: 'cap' |
   return rows[0];
 }
 
+export type ExtendResult =
+  | { ok: true; giveaway: Giveaway; change: { endsAt?: Date; maxParticipants?: number } }
+  | { ok: false; error: string };
+
+/**
+ * Adds time and/or spots. Extending a giveaway that already ended (by time or by filling up)
+ * reopens it; one an admin closed early stays closed.
+ */
+export async function extendGiveaway(g: Giveaway, add: { hours?: number; spots?: number }, actorId: string): Promise<ExtendResult> {
+  if (!add.hours && !add.spots) return { ok: false, error: 'Add hours or spots.' };
+  if (g.closeReason === 'early') return { ok: false, error: 'This giveaway was closed early by an admin. Change it from the dashboard.' };
+  if (add.spots && !g.maxParticipants) return { ok: false, error: "This giveaway has no participant cap, so there's nothing to add spots to." };
+
+  const change: { endsAt?: Date; maxParticipants?: number } = {};
+  if (add.hours) change.endsAt = new Date(Math.max(g.endsAt.getTime(), Date.now()) + add.hours * 3_600_000);
+  if (add.spots) change.maxParticipants = g.maxParticipants! + add.spots;
+
+  if (change.endsAt && g.startsAt) {
+    const overlap = await findOverlap(g.startsAt, change.endsAt, g.id);
+    if (overlap) return { ok: false, error: `That would overlap with "${overlap.name}".` };
+  }
+
+  // Reopen if it closed because time ran out or it filled up, and the extension fixes that.
+  const reopen = g.closeReason === 'cap' ? !!change.maxParticipants : !!change.endsAt && !g.closedAt;
+  const [updated] = await db
+    .update(giveaways)
+    .set({ ...change, ...(reopen && g.closedAt ? { closedAt: null, closeReason: null } : {}), updatedAt: new Date() })
+    .where(eq(giveaways.id, g.id))
+    .returning();
+  await audit(g.id, actorId, 'giveaway.extended', { ...add, ...change });
+  return { ok: true, giveaway: updated!, change };
+}
+
 /** Another not-closed giveaway whose dates overlap [start, end). Only one may run at a time. */
 export async function findOverlap(start: Date, end: Date, excludeId?: number) {
   return db.query.giveaways.findFirst({

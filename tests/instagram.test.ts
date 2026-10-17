@@ -6,7 +6,7 @@ process.env.CLIENT_ID ??= 'x';
 process.env.SERVER_ID ??= 'x';
 process.env.DATABASE_URL ??= 'postgresql://x@localhost:1/x';
 
-const { parseShortcode, captionHasHashtag, toComment } = await import('../src/instagram/api.js');
+const { parseShortcode, toComment } = await import('../src/instagram/api.js');
 const { commentsToRevoke, tagsAFriend } = await import('../src/instagram/comments.js');
 
 test('parseShortcode: post, reel, share params, profile-style links', () => {
@@ -15,12 +15,6 @@ test('parseShortcode: post, reel, share params, profile-style links', () => {
   assert.equal(parseShortcode('instagram.com/bostonblerds/p/Deh5vQnH9kZ'), 'Deh5vQnH9kZ');
   assert.equal(parseShortcode('https://www.instagram.com/bostonblerds/'), null);
   assert.equal(parseShortcode('not a link'), null);
-});
-
-test('captionHasHashtag: case, punctuation, near-misses', () => {
-  assert.equal(captionHasHashtag('GTA VI is coming #BBxGTAVI!', '#BBxGTAVI'), true);
-  assert.equal(captionHasHashtag('#bbxgtavi2', '#BBxGTAVI'), false);
-  assert.equal(captionHasHashtag(null, '#BBxGTAVI'), false);
 });
 
 test('commentsToRevoke: counted comments no longer visible lose their entry', () => {

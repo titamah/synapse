@@ -7,7 +7,7 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
 - **Who's acting:** every change (`POST` / `PATCH` / `DELETE`) must send `X-Admin-User: <signed-in admin's email>`. It's recorded in the audit log.
 - **Dates:** ISO 8601 with offset, e.g. `2026-11-20T22:30:00-05:00`. Show them in Eastern time.
 - **Errors:** `{ "error": "message" }` with 400 (invalid input), 401 (bad key), 404, or 409 (conflict, e.g. overlapping giveaway).
-- **Optional fields** can be left out **or sent as `null`**. For `igPost`, `entryChannel`, `igHashtag`, `reminderText`, `maxParticipants`, and a rule's `windowStart` / `windowEnd` / `frequency`, `null` **clears** the value. For everything else, `null` means "not set": the default on create, unchanged on edit. Extra fields (e.g. `status`, `description`, `entrantCount`) are ignored, so you can send back what you received.
+- **Optional fields** can be left out **or sent as `null`**. For `igPost`, `entryChannel`, `reminderText`, `maxParticipants`, and a rule's `windowStart` / `windowEnd` / `frequency`, `null` **clears** the value. For everything else, `null` means "not set": the default on create, unchanged on edit. Extra fields (e.g. `status`, `description`, `entrantCount`) are ignored, so you can send back what you received.
 
 ---
 
@@ -26,7 +26,6 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
   "igMediaId": "18114618824037715",               // the giveaway's Instagram post (set via igPost)
   "igPermalink": "https://www.instagram.com/p/…/",
   "igPostedAt": "2026-10-19T16:00:00.000Z",
-  "igHashtag": "#BBxGTAVI",                         // optional fallback: if no post is set, the first recent post with this hashtag is used
   "igSync": {                                       // last comment read; null if none yet
     "lastRunAt": "…", "lastSuccessAt": "…", "lastReason": "scheduled" | "post-set" | "final" | "manual",
     "lastError": null,                              // a message here = Instagram isn't working (e.g. token expired). Show a warning.
@@ -35,8 +34,14 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
   "formFields": [ /* FormField, max 5 */ ],
   "reminderText": "Don't forget to follow [@BostonBlerds](https://instagram.com/bostonblerds)!",  // Discord markdown, links OK
   "maxParticipants": null,                         // closes automatically when reached
-  "announcements": { "enabled": true, "milestoneEvery": 100, "countdownHours": [336, 72, 24, 5] },
-  "testMode": false,                               // true = never posts announcements
+  "announcements": {                               // Discord updates in #community-updates (defaults shown)
+    "enabled": true,                               // master switch
+    "started": true, "closed": true, "extended": true,
+    "milestones": { "enabled": true, "every": 100 },               // "🎯 100 entrants!"
+    "capacity":   { "enabled": true, "percents": [50, 75, 90, 95, 99] },   // only with maxParticipants; 99% includes [Extend]
+    "countdown":  { "enabled": true, "hours": [336, 72, 24, 5] }   // live countdown + [Extend]
+  },
+  "testMode": false,                               // true = never posts updates, and can be deleted without confirming
   "winnerNotify": "manual" | "auto", "claimHours": 12,
   "winnerEntrantId": null, "winnerRecordedBy": null, "winnerRecordedAt": null,
   "entrantCount": 0,
@@ -77,7 +82,7 @@ An action counts under the **most specific** rule (narrowest window) that still 
 | GET | `/giveaways/:id` | — | `Giveaway` |
 | PATCH | `/giveaways/:id` | Any create fields | `Giveaway` |
 | POST | `/giveaways/:id/close` | — | `Giveaway` (closes early) |
-| DELETE | `/giveaways/:id?confirm=<name>` | — | `{ deleted, id, name, entrants }`. **Permanent:** removes the giveaway and all its entrants, entries, rules and history. `409` if it's open (close it first). If it has entrants, `confirm` must equal the giveaway's exact name, otherwise `400` with `requiresConfirm: true` and the entrant count, which is handy for a "type the name to delete" dialog. |
+| DELETE | `/giveaways/:id?confirm=<name>` | — | `{ deleted, id, name, entrants }`. **Permanent:** removes the giveaway and all its entrants, entries, rules and history. `409` if it's open (close it first). `confirm` must equal the giveaway's exact name (not needed for test-mode giveaways), otherwise `400` with `requiresConfirm: true` and the entrant count, for a "type the name to delete" dialog. |
 | GET | `/giveaways/:id/entrants` | — | `{ entrants: Entrant[], unmatched: Bonus[] }` |
 | POST | `/giveaways/:id/bonuses` | `{ entrantId, label }` | `201 Bonus` (manual entry) |
 | DELETE | `/giveaways/:id/bonuses/:bonusId` | `{ reason? }` | `Bonus` (removed) |
@@ -102,7 +107,7 @@ Set the giveaway's post with **`igPost`** on create or edit: a post link (`https
 | GET | `/instagram/resolve?url=<link>` | The post for a link (preview before saving), or `404` |
 | POST | `/giveaways/:id/sync` | "Sync now": reads comments immediately, returns `{ igSync }` |
 
-**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `igPost`, `entryChannel`, `igHashtag`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
+**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `igPost`, `entryChannel`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
 
 **PATCH rules:** send the **full list** in the order you want. Include `id` for existing rules, omit it for new ones; rules you leave out are deleted. Entries already earned under a deleted rule are kept.
 
@@ -147,3 +152,12 @@ const res = await fetch('https://api.bostonblerds.com/admin/giveaways', {
   }),
 });
 ```
+
+---
+
+## Discord side (for reference)
+- Updates post to **#community-updates** (admin-only) per the `announcements` settings. Changing `endsAt` to later, or raising `maxParticipants`, posts an "extended" update.
+- **[Extend]** on countdown and 99%-capacity updates: admins add hours and/or spots in Discord. A giveaway that filled up or ran out of time reopens; one closed early stays closed.
+- Right-click an update → **Apps → Post to giveaway channel** reposts it (without buttons) in the giveaway's entry channel.
+- `/admin giveaway timer` posts a live countdown on demand. `/admin` is hidden from members.
+- `/giveaway` only exists in the server while a giveaway is open.

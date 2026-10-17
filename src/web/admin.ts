@@ -9,6 +9,8 @@ import { giveawayRules, giveaways } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
+import { announceExtended } from '../giveaway/announcements.js';
+import { resolveAnnouncements } from '../giveaway/announcementRules.js';
 import type { Rule } from '../giveaway/rules.js';
 import {
   addManualBonus,
@@ -72,18 +74,21 @@ const giveawayFields = {
   // The giveaway's Instagram post: a link (instagram.com/p/…) or media ID. Can be set any time,
   // even after the giveaway starts; comments are counted from startsAt. null = clear.
   igPost: z.string().min(1).max(500).nullish(),
-  // Fallback when no post is set: the first recent post with this hashtag in its caption.
-  igHashtag: z.string().regex(/^#\w{1,60}$/, 'a single hashtag like #BBxGTAVI').nullish(),
   reminderText: z.string().max(500).nullish(),
   maxParticipants: z.number().int().min(1).nullish(),
   // null = not set
   formFields: unset(z.array(formFieldSchema).max(5)),
   rules: unset(z.array(ruleSchema).max(20)),
+  // Discord updates in #community-updates. Anything left out uses the defaults.
   announcements: unset(
     z.object({
-      enabled: unset(z.boolean()).transform(v => v ?? true),
-      milestoneEvery: unset(z.number().int().min(1)),
-      countdownHours: unset(z.array(z.number().positive()).max(10)),
+      enabled: unset(z.boolean()),
+      started: unset(z.boolean()),
+      closed: unset(z.boolean()),
+      extended: unset(z.boolean()),
+      milestones: unset(z.object({ enabled: z.boolean(), every: z.number().int().min(1).max(100_000) })),
+      capacity: unset(z.object({ enabled: z.boolean(), percents: z.array(z.number().int().min(1).max(100)).max(10) })),
+      countdown: unset(z.object({ enabled: z.boolean(), hours: z.array(z.number().positive().max(24 * 365)).max(10) })),
     }),
   ),
   testMode: unset(z.boolean()),
@@ -99,7 +104,6 @@ type GiveawayInput = z.infer<typeof updateSchema>;
 function crossCheck(merged: {
   startsAt: Date | null;
   endsAt: Date;
-  igHashtag?: string | null | undefined;
   formFields: { id: string; type: string }[];
   rules: { action: string; windowStart?: Date | null | undefined; windowEnd?: Date | null | undefined }[];
 }) {
@@ -140,6 +144,8 @@ async function giveawayJson(g: Giveaway) {
     status: statusOf(g),
     entrantCount: await entrantCount(g.id),
     rules: rules.map(r => ({ ...r, description: describeRule(r) })),
+    // Effective update settings with defaults filled in, for the dashboard's toggles.
+    announcements: resolveAnnouncements(g.announcements),
     // Last Instagram comment read: show a warning when lastError is set.
     igSync: await getSyncStatus(g.id),
   };
@@ -232,7 +238,6 @@ export function createAdminRouter(client?: Client) {
           startsAt: input.startsAt,
           endsAt: input.endsAt,
           entryChannel: input.entryChannel ?? null,
-          igHashtag: input.igHashtag ?? null,
           igMediaId: igPost?.id ?? null,
           igPostedAt: igPost ? new Date(igPost.postedAt) : null,
           igPermalink: igPost?.permalink ?? null,
@@ -280,7 +285,6 @@ export function createAdminRouter(client?: Client) {
     const merged = {
       startsAt: input.startsAt ?? g.startsAt,
       endsAt: input.endsAt ?? g.endsAt,
-      igHashtag: input.igHashtag !== undefined ? input.igHashtag : g.igHashtag,
       formFields: input.formFields ?? g.formFields,
       rules: input.rules ?? currentRules,
     };
@@ -332,6 +336,11 @@ export function createAdminRouter(client?: Client) {
     });
     await audit(g.id, req.actor!, 'giveaway.updated', { fields: Object.keys(input), ...(postChange ? { igPost: postChange.permalink } : {}) });
     const updated = (await getGiveaway(g.id))!;
+    // Later end time or a bigger cap: tell #community-updates.
+    const extended: { endsAt?: Date; maxParticipants?: number } = {};
+    if (updated.endsAt > g.endsAt) extended.endsAt = updated.endsAt;
+    if (updated.maxParticipants && (!g.maxParticipants || updated.maxParticipants > g.maxParticipants)) extended.maxParticipants = updated.maxParticipants;
+    if (Object.keys(extended).length && statusOf(updated) !== 'closed') inBackground(announceExtended(client, updated, extended));
     // A new post: read its comments now instead of waiting for the next scheduled read.
     if (postChange?.id && postChange.id !== g.igMediaId) inBackground(runCommentSync(updated, 'post-set'));
     res.json(await giveawayJson(updated));
@@ -344,15 +353,16 @@ export function createAdminRouter(client?: Client) {
     res.json(await giveawayJson(closed));
   });
 
-  // Permanent delete. Open giveaways must be closed first; ones with entrants need ?confirm=<giveaway name>.
+  // Permanent delete. Open giveaways must be closed first; needs ?confirm=<giveaway name> unless in test mode.
   router.delete('/giveaways/:id', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
     if (statusOf(g) === 'open') return void res.status(409).json({ error: 'Close this giveaway before deleting it.' });
     const entrantsSoFar = await entrantCount(g.id);
     const confirm = typeof req.query.confirm === 'string' ? req.query.confirm.trim() : '';
-    if (entrantsSoFar > 0 && confirm !== (g.name ?? g.slug)) {
+    // Every delete needs the exact name typed, except test-mode giveaways.
+    if (!g.testMode && confirm !== (g.name ?? g.slug)) {
       return void res.status(400).json({
-        error: `This giveaway has ${entrantsSoFar} entrant${entrantsSoFar === 1 ? '' : 's'}. To delete it and all their entries, add ?confirm=<giveaway name> (exactly "${g.name ?? g.slug}").`,
+        error: `To permanently delete this giveaway${entrantsSoFar ? ` and its ${entrantsSoFar} entrant${entrantsSoFar === 1 ? '' : 's'}` : ''}, add ?confirm=<giveaway name> (exactly "${g.name ?? g.slug}").`,
         requiresConfirm: true,
         entrants: entrantsSoFar,
       });
@@ -364,7 +374,7 @@ export function createAdminRouter(client?: Client) {
   // "Sync now": read the post's comments immediately and return the result.
   router.post('/giveaways/:id/sync', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
-    if (!g.igMediaId && !g.igHashtag) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post first' });
+    if (!g.igMediaId) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post first' });
     await runCommentSync(g, 'manual');
     res.json({ igSync: await getSyncStatus(g.id) });
   });

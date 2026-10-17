@@ -1,5 +1,5 @@
 import { env } from '../config/environment.js';
-import { setGiveawayPost, type Giveaway } from '../giveaway/service.js';
+import type { Giveaway } from '../giveaway/service.js';
 
 const GRAPH = 'https://graph.instagram.com/v26.0';
 
@@ -106,34 +106,9 @@ export async function resolvePost(input: string): Promise<IgPost | null> {
 
 export type GiveawayPost = { id: string; postedAt: Date };
 
-/** The giveaway's post if it's already been set or found (no API call). */
+/** The giveaway's Instagram post, set from the dashboard (igPost). */
 export function knownGiveawayPost(g: Giveaway): GiveawayPost | null {
   return g.igMediaId && g.igPostedAt ? { id: g.igMediaId, postedAt: g.igPostedAt } : null;
-}
-
-export function captionHasHashtag(caption: string | null | undefined, hashtag: string) {
-  const tag = hashtag.toLowerCase();
-  return !!caption?.toLowerCase().split(/\s+/).some(word => word.replace(/[^\w#]/g, '') === tag);
-}
-
-/**
- * The giveaway's post: the one set in the dashboard, or (fallback) the earliest recent
- * @BostonBlerds post whose caption contains the giveaway's hashtag, saved once found.
- */
-export async function findGiveawayPost(g: Giveaway): Promise<GiveawayPost | null> {
-  const known = knownGiveawayPost(g);
-  if (known || !g.igHashtag) return known;
-
-  const match = (await listRecentPosts(25))
-    .filter(p => captionHasHashtag(p.caption, g.igHashtag!))
-    .sort((x, y) => x.postedAt.localeCompare(y.postedAt))[0];
-  if (!match) return null;
-
-  const post = { id: match.id, postedAt: new Date(match.postedAt) };
-  await setGiveawayPost(g.id, post.id, post.postedAt, match.permalink);
-  Object.assign(g, { igMediaId: post.id, igPostedAt: post.postedAt, igPermalink: match.permalink });
-  console.log(`Giveaway post found for "${g.name}" by hashtag: ${match.permalink}`);
-  return post;
 }
 
 // ---------------------------------------------------------------------------

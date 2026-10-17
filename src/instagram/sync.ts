@@ -63,8 +63,7 @@ export async function runFinalSync(g: Giveaway) {
 /** Every 30 minutes: the open giveaway, plus a final read for any that closed in the last 2 days. */
 export async function runScheduledSyncs() {
   const open = await getOpenGiveaway();
-  if (open && open.igMediaId) await runCommentSync(open, 'scheduled');
-  else if (open?.igHashtag) await runCommentSync(open, 'scheduled'); // hashtag fallback: look for the post
+  if (open?.igMediaId) await runCommentSync(open, 'scheduled');
 
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
   const recentlyClosed = await db.query.giveaways.findMany({

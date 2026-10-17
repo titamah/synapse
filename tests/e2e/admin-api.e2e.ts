@@ -69,7 +69,6 @@ const testGiveaway = {
   startsAt: iso(now - 60 * 60e3),
   endsAt: iso(now + 20 * 60 * 60e3),
   entryChannel: 'test-giveaway',
-  igHashtag: '#BBTest',
   formFields: [
     { id: 'ig', label: 'Instagram username', type: 'ig_username', required: true },
     { id: 'platform', label: 'What do you play on?', type: 'select', required: true, options: ['PS5', 'Xbox', 'PC'] },
@@ -180,19 +179,26 @@ ok('story after close earns nothing', (await award('ig_story', 'sam_ig', 'late1'
 // Cap: a giveaway with max 2 participants closes itself on the 2nd entry.
 const capped = await api('POST', '/giveaways', {
   name: 'Capped', startsAt: iso(now - 60e3), endsAt: iso(now + 60 * 60e3), maxParticipants: 2,
-  formFields: null, rules: null, entryChannel: null, igHashtag: null, reminderText: null,
+  formFields: null, rules: null, entryChannel: null, igPost: null, reminderText: null,
   announcements: null, testMode: null, winnerNotify: null, claimHours: null,
 });
 ok('create with nulls everywhere → 201 with defaults', capped.status === 201 && capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0, capped.json);
-ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}`)).status === 409);
+ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}?confirm=Capped`)).status === 409);
 const cg = await svc.getOpenGiveaway();
 await svc.submitEntry({ giveaway: cg, discordId: 'a', discordUsername: 'a', values: {} });
 await svc.submitEntry({ giveaway: cg, discordId: 'b', discordUsername: 'b', values: {} });
 ok('cap reached → closes automatically', (await svc.getOpenGiveaway()) === null && (await svc.getGiveaway(cg.id)).closeReason === 'cap');
+const reopened = await svc.extendGiveaway(await svc.getGiveaway(cg.id), { spots: 1 }, 'tester');
+ok('extend a full giveaway with spots → reopens', reopened.ok && reopened.giveaway.maxParticipants === 3 && (await svc.getOpenGiveaway())?.id === cg.id, reopened);
+const noCapSpots = await svc.extendGiveaway({ ...(await svc.getGiveaway(cg.id)), maxParticipants: null }, { spots: 5 }, 'tester');
+ok('spots without a cap → refused', !noCapSpots.ok, noCapSpots);
+await svc.closeGiveaway(cg.id, 'tester', 'early');
+const earlyExtend = await svc.extendGiveaway(await svc.getGiveaway(cg.id), { hours: 2 }, 'tester');
+ok('extend a giveaway an admin closed early → refused', !earlyExtend.ok, earlyExtend);
 
 // Delete: closed giveaway with entrants needs ?confirm=<name>.
 const noConfirm = await api('DELETE', `/giveaways/${gid}`);
-ok('delete with entrants, no confirm → 400 requiresConfirm', noConfirm.status === 400 && noConfirm.json.requiresConfirm === true && noConfirm.json.entrants === 2, noConfirm.json);
+ok('delete without confirm → 400 requiresConfirm', noConfirm.status === 400 && noConfirm.json.requiresConfirm === true && noConfirm.json.entrants === 2, noConfirm.json);
 ok('delete with wrong confirm → 400', (await api('DELETE', `/giveaways/${gid}?confirm=nope`)).status === 400);
 const del = await api('DELETE', `/giveaways/${gid}?confirm=${encodeURIComponent('Test Giveaway')}`);
 ok('delete with confirm → 200', del.status === 200 && del.json.deleted === true && del.json.entrants === 2, del.json);
