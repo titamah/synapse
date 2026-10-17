@@ -37,7 +37,7 @@ await pool.query(`INSERT INTO bonuses (giveaway_id, ig_username, type, source, s
 // --- 2. Run the new migrations ---------------------------------------------------
 await migrate(db, { migrationsFolder: `${repo}/drizzle` });
 const gta = (await pool.query(`SELECT * FROM giveaways WHERE slug='gta6-2026'`)).rows[0];
-ok('GTA becomes giveaway #1 with settings', gta.name === 'GTA VI Giveaway' && gta.ig_hashtag === '#BBxGTAVI' && gta.entry_channel === 'gta-giveaway' && gta.form_fields[0].type === 'ig_username', gta);
+ok('GTA becomes giveaway #1 with settings', gta.name === 'GTA VI Giveaway' && gta.entry_channel === 'gta-giveaway' && gta.form_fields[0].type === 'ig_username', gta);
 const gtaRules = (await pool.query(`SELECT * FROM giveaway_rules WHERE giveaway_id=1 ORDER BY position`)).rows;
 ok('GTA gets comment + story rules', gtaRules.length === 2 && gtaRules[0].action === 'ig_comment' && gtaRules[0].options.requireTag === true && gtaRules[1].action === 'ig_story', gtaRules);
 const legacy = (await pool.query(`SELECT * FROM bonuses WHERE source_ref='c-legacy'`)).rows[0];

@@ -57,6 +57,13 @@
       "when": 1792278903375,
       "tag": "0007_ig_entry_and_tags",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792279380424,
+      "tag": "0008_drop_legacy_columns",
+      "breakpoints": true
     }
   ]
 }

@@ -42,7 +42,6 @@ export const giveaways = pgTable('giveaways', {
   // How people enter: Discord (/giveaway enter), Instagram (first counted Instagram action), or either.
   entryMethod: text('entry_method').$type<'discord' | 'instagram' | 'either'>().notNull().default('discord'),
   entryChannel: text('entry_channel'),
-  igHashtag: text('ig_hashtag'),
   formFields: jsonb('form_fields').$type<FormField[]>().notNull().default([]),
   reminderText: text('reminder_text'),
   maxParticipants: integer('max_participants'),
@@ -56,17 +55,10 @@ export const giveaways = pgTable('giveaways', {
   notifyDelayMinutes: integer('notify_delay_minutes').notNull().default(30),
   winnerMessage: text('winner_message'),
   claimHours: integer('claim_hours').notNull().default(12),
-  // Legacy single-winner columns, superseded by the winners table.
-  winnerEntrantId: integer('winner_entrant_id'),
-  winnerRecordedBy: text('winner_recorded_by'),
-  winnerRecordedAt: timestamp('winner_recorded_at', { withTimezone: true }),
-  // The giveaway's Instagram post: set from a link in the dashboard, or found by its caption hashtag.
+  // The giveaway's Instagram post, set from a link in the dashboard.
   igMediaId: text('ig_media_id'),
   igPostedAt: timestamp('ig_posted_at', { withTimezone: true }),
   igPermalink: text('ig_permalink'),
-  // Unused legacy columns, removed in a later cleanup migration.
-  channelId: text('channel_id'),
-  messageId: text('message_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -124,7 +116,6 @@ export const entrants = pgTable(
   ],
 );
 
-export const bonusType = pgEnum('bonus_type', ['COMMENT', 'STORY', 'IRL']);
 export const bonusSource = pgEnum('bonus_source', ['admin', 'ig_api', 'ig_webhook', 'posh']);
 
 /**
@@ -142,8 +133,6 @@ export const bonuses = pgTable(
     entrantId: integer('entrant_id').references(() => entrants.id),
     label: text('label'),
     igUsername: text('ig_username'),
-    // Legacy fixed type (COMMENT/STORY/IRL), superseded by action + rule_id.
-    type: bonusType('type'),
     source: bonusSource('source').notNull(),
     sourceRef: text('source_ref'),
     createdBy: text('created_by'),

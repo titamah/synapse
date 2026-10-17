@@ -153,7 +153,6 @@ export async function deleteGiveaway(g: Giveaway, actorId: string) {
   const entrantTotal = count[0]!.n;
 
   await db.transaction(async tx => {
-    await tx.update(giveaways).set({ winnerEntrantId: null }).where(eq(giveaways.id, g.id));
     await tx.delete(bonuses).where(eq(bonuses.giveawayId, g.id));
     await tx.delete(entrants).where(eq(entrants.giveawayId, g.id));
     await tx.delete(auditLog).where(eq(auditLog.giveawayId, g.id));
@@ -175,19 +174,6 @@ export async function setGiveawayPost(giveawayId: number, mediaId: string | null
     .update(giveaways)
     .set({ igMediaId: mediaId, igPostedAt: postedAt, igPermalink: permalink, updatedAt: new Date() })
     .where(eq(giveaways.id, giveawayId));
-}
-
-export async function recordWinner(giveawayId: number, entrantId: number, actorId: string) {
-  const entrant = await db.query.entrants.findFirst({
-    where: and(eq(entrants.id, entrantId), eq(entrants.giveawayId, giveawayId)),
-  });
-  if (!entrant) return null;
-  await db
-    .update(giveaways)
-    .set({ winnerEntrantId: entrantId, winnerRecordedBy: actorId, winnerRecordedAt: new Date(), updatedAt: new Date() })
-    .where(eq(giveaways.id, giveawayId));
-  await audit(giveawayId, actorId, 'giveaway.winner_recorded', { entrantId, discordUsername: entrant.discordUsername });
-  return entrant;
 }
 
 // ---------------------------------------------------------------------------
