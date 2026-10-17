@@ -102,6 +102,21 @@ const patched = await api('PATCH', `/giveaways/${gid}`, {
 ok('add event rule via PATCH', patched.status === 200 && patched.json.rules.length === 3, patched.json);
 ok('rule descriptions are readable', patched.json.rules.some((r: any) => /Story mention \(max 5, /.test(r.description)), patched.json.rules.map((r: any) => r.description));
 
+// Dashboard forms often send null for empty optional fields.
+const nullPatch = await api('PATCH', `/giveaways/${gid}`, {
+  reminderText: null, maxParticipants: null, testMode: null, announcements: null,
+  winnerNotify: null, claimHours: null, formFields: null, rules: null,
+});
+ok('PATCH with nulls → 200, nulls clear or keep', nullPatch.status === 200 && nullPatch.json.reminderText === null && nullPatch.json.rules.length === 3 && nullPatch.json.formFields.length === 2 && nullPatch.json.claimHours === 12, nullPatch.json);
+const nullFieldPatch = await api('PATCH', `/giveaways/${gid}`, {
+  formFields: [
+    { id: 'ig', label: 'Instagram username', type: 'ig_username', required: true, placeholder: null, options: null },
+    { id: 'platform', label: 'What do you play on?', type: 'select', required: true, placeholder: null, options: ['PS5', 'Xbox', 'PC'] },
+  ],
+  rules: nullPatch.json.rules.map((r: any) => ({ ...r, frequency: null, options: r.options.requireTag ? { requireTag: true } : null })),
+});
+ok('form fields + rules with null sub-fields → 200', nullFieldPatch.status === 200 && nullFieldPatch.json.rules.length === 3, nullFieldPatch.json);
+
 // --- 4. Engine: entries + Instagram actions --------------------------------------
 const svc = await import(`${repo}/src/giveaway/service.ts`);
 const open = await svc.getOpenGiveaway();
@@ -162,9 +177,11 @@ ok('story after close earns nothing', (await award('ig_story', 'sam_ig', 'late1'
 
 // Cap: a giveaway with max 2 participants closes itself on the 2nd entry.
 const capped = await api('POST', '/giveaways', {
-  name: 'Capped', startsAt: iso(now - 60e3), endsAt: iso(now + 60 * 60e3), formFields: [], rules: [], maxParticipants: 2,
+  name: 'Capped', startsAt: iso(now - 60e3), endsAt: iso(now + 60 * 60e3), maxParticipants: 2,
+  formFields: null, rules: null, entryChannel: null, igHashtag: null, reminderText: null,
+  announcements: null, testMode: null, winnerNotify: null, claimHours: null,
 });
-ok('discord-only giveaway with cap created', capped.status === 201, capped.json);
+ok('create with nulls everywhere → 201 with defaults', capped.status === 201 && capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0, capped.json);
 const cg = await svc.getOpenGiveaway();
 await svc.submitEntry({ giveaway: cg, discordId: 'a', discordUsername: 'a', values: {} });
 await svc.submitEntry({ giveaway: cg, discordId: 'b', discordUsername: 'b', values: {} });

@@ -32,47 +32,56 @@ import {
 
 const isoDate = z.iso.datetime({ offset: true }).transform(s => new Date(s));
 
+/**
+ * Optional field that may be left out OR sent as null; null means "not set" (use the default
+ * on create, leave unchanged on edit). For fields where null means "clear it", use .nullish().
+ */
+const unset = <T extends z.ZodType>(schema: T) => schema.nullish().transform(v => v ?? undefined);
+
 const formFieldSchema = z
   .object({
     id: z.string().regex(/^[a-z0-9_]{1,40}$/, 'lowercase letters, numbers and underscores'),
     label: z.string().min(1).max(45),
     type: z.enum(['ig_username', 'short_text', 'long_text', 'select']),
-    required: z.boolean(),
-    placeholder: z.string().max(100).optional(),
-    options: z.array(z.string().min(1).max(100)).min(1).max(25).optional(),
+    required: unset(z.boolean()).transform(v => v ?? false),
+    placeholder: unset(z.string().max(100)),
+    options: unset(z.array(z.string().min(1).max(100)).max(25)).transform(v => (v?.length ? v : undefined)),
   })
   .refine(f => f.type !== 'select' || !!f.options?.length, { message: 'select fields need options' });
 
 const ruleSchema = z.object({
-  id: z.number().int().optional(),
+  id: unset(z.number().int()),
   action: z.enum(['ig_comment', 'ig_story']),
   maxCount: z.number().int().min(1).max(1000),
-  windowStart: isoDate.nullable().optional(),
-  windowEnd: isoDate.nullable().optional(),
-  frequency: z.enum(['day', 'week']).nullable().optional(),
-  options: z.object({ requireTag: z.boolean().optional() }).optional(),
+  // null = no window / no frequency
+  windowStart: isoDate.nullish(),
+  windowEnd: isoDate.nullish(),
+  frequency: z.enum(['day', 'week']).nullish(),
+  options: unset(z.object({ requireTag: unset(z.boolean()) })),
 });
 
 const giveawayFields = {
   name: z.string().min(1).max(80),
   startsAt: isoDate,
   endsAt: isoDate,
-  entryChannel: z.string().max(100).nullable().optional(),
-  igHashtag: z.string().regex(/^#\w{1,60}$/, 'a single hashtag like #BBxGTAVI').nullable().optional(),
-  formFields: z.array(formFieldSchema).max(5),
-  reminderText: z.string().max(500).nullable().optional(),
-  maxParticipants: z.number().int().min(1).nullable().optional(),
-  announcements: z
-    .object({
-      enabled: z.boolean(),
-      milestoneEvery: z.number().int().min(1).optional(),
-      countdownHours: z.array(z.number().positive()).max(10).optional(),
-    })
-    .optional(),
-  testMode: z.boolean().optional(),
-  winnerNotify: z.enum(['manual', 'auto']).optional(),
-  claimHours: z.number().int().min(1).max(720).optional(),
-  rules: z.array(ruleSchema).max(20),
+  // null = clear the setting
+  entryChannel: z.string().max(100).nullish(),
+  igHashtag: z.string().regex(/^#\w{1,60}$/, 'a single hashtag like #BBxGTAVI').nullish(),
+  reminderText: z.string().max(500).nullish(),
+  maxParticipants: z.number().int().min(1).nullish(),
+  // null = not set
+  formFields: unset(z.array(formFieldSchema).max(5)),
+  rules: unset(z.array(ruleSchema).max(20)),
+  announcements: unset(
+    z.object({
+      enabled: unset(z.boolean()).transform(v => v ?? true),
+      milestoneEvery: unset(z.number().int().min(1)),
+      countdownHours: unset(z.array(z.number().positive()).max(10)),
+    }),
+  ),
+  testMode: unset(z.boolean()),
+  winnerNotify: unset(z.enum(['manual', 'auto'])),
+  claimHours: unset(z.number().int().min(1).max(720)),
 };
 
 const createSchema = z.object(giveawayFields);
@@ -175,8 +184,8 @@ export function createAdminRouter(client?: Client) {
   router.post('/giveaways', requireActor, async (req: Req, res) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return void res.status(400).json({ error: z.prettifyError(parsed.error) });
-    const input = parsed.data;
-    const problem = crossCheck({ ...input, rules: input.rules });
+    const input = { ...parsed.data, formFields: parsed.data.formFields ?? [], rules: parsed.data.rules ?? [] };
+    const problem = crossCheck(input);
     if (problem) return void res.status(400).json({ error: problem });
 
     const overlap = await findOverlap(input.startsAt, input.endsAt);

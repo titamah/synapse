@@ -7,6 +7,7 @@ For **admin.bostonblerds.com**. Synapse owns the giveaway data; the dashboard is
 - **Who's acting:** every change (`POST` / `PATCH` / `DELETE`) must send `X-Admin-User: <signed-in admin's email>`. It's recorded in the audit log.
 - **Dates:** ISO 8601 with offset, e.g. `2026-11-20T22:30:00-05:00`. Show them in Eastern time.
 - **Errors:** `{ "error": "message" }` with 400 (invalid input), 401 (bad key), 404, or 409 (conflict, e.g. overlapping giveaway).
+- **Optional fields** can be left out **or sent as `null`**. For `entryChannel`, `igHashtag`, `reminderText`, `maxParticipants`, and a rule's `windowStart` / `windowEnd` / `frequency`, `null` **clears** the value. For everything else, `null` means "not set": the default on create, unchanged on edit. Extra fields (e.g. `status`, `description`, `entrantCount`) are ignored, so you can send back what you received.
 
 ---
 
@@ -80,7 +81,7 @@ An action counts under the **most specific** rule (narrowest window) that still 
 | GET | `/giveaways/:id/export/entrants.csv` | — | One row **per person**: form answers, entries per rule, totals |
 | GET | `/giveaways/:id/export/audit.csv` | — | Full history |
 
-**Create body:** `name`, `startsAt`, `endsAt`, `formFields`, `rules` are required. Everything else is optional: `entryChannel`, `igHashtag`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
+**Create body:** `name`, `startsAt`, `endsAt` are required. `formFields` and `rules` default to empty. Everything else is optional: `entryChannel`, `igHashtag`, `reminderText`, `maxParticipants`, `announcements`, `testMode`, `winnerNotify`, `claimHours`.
 
 **PATCH rules:** send the **full list** in the order you want. Include `id` for existing rules, omit it for new ones; rules you leave out are deleted. Entries already earned under a deleted rule are kept.
 
