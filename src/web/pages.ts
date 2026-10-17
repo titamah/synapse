@@ -1,7 +1,7 @@
 // Public policy pages required by Meta for the Instagram app.
 // Plain HTML so they load fast and need no build step.
 
-const CONTACT_EMAIL = 'hello@bostonblerds.com';
+const CONTACT_EMAIL = 'help@bostonblerds.com';
 const UPDATED = 'October 16, 2026';
 
 function layout(title: string, body: string) {
