@@ -10,6 +10,7 @@ import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
 import { syncComments } from './instagram/comments.js';
+import { processPendingInstagramEvents } from './instagram/webhook.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -93,6 +94,9 @@ async function runCommentSync() {
   }
 }
 let commentSync: NodeJS.Timeout | undefined;
+if (env.IG_ACCESS_TOKEN) {
+  void processPendingInstagramEvents().catch(err => console.error('Pending webhook retry failed:', err));
+}
 if (env.IG_ACCESS_TOKEN && env.IG_GIVEAWAY_POST) {
   void runCommentSync();
   commentSync = setInterval(runCommentSync, COMMENT_SYNC_MS);

@@ -61,3 +61,9 @@ export async function getAllComments(mediaId: string): Promise<IgComment[]> {
   });
   return top.flatMap(({ replies, ...c }) => [c, ...(replies?.data ?? [])]);
 }
+
+/** Story mentions only include the sender's Instagram-scoped ID; this looks up their username. */
+export async function getUsernameForSender(senderId: string): Promise<string> {
+  const user = await graphGet<{ username: string }>(`/${senderId}`, { fields: 'username' });
+  return user.username;
+}
