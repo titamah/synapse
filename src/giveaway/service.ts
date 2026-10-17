@@ -1,6 +1,6 @@
-import { and, asc, desc, eq, gt, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { auditLog, bonuses, entrants, giveawayRules, giveaways, type FormField, type RuleAction } from '../db/schema.js';
+import { auditLog, bonuses, entrants, giveawayRules, giveaways, settings, type FormField, type RuleAction } from '../db/schema.js';
 import { chooseRule, type Rule } from './rules.js';
 
 export type Giveaway = typeof giveaways.$inferSelect;
@@ -105,6 +105,36 @@ export async function findOverlap(start: Date, end: Date, excludeId?: number) {
       excludeId ? ne(giveaways.id, excludeId) : undefined,
     ),
   });
+}
+
+/**
+ * Permanently deletes a giveaway and everything under it: entrants, bonus entries, rules,
+ * sent announcements, audit history and sync status. Leaves one summary row in the
+ * general audit log. Callers must check it isn't open.
+ */
+export async function deleteGiveaway(g: Giveaway, actorId: string) {
+  const count = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(entrants)
+    .where(eq(entrants.giveawayId, g.id));
+  const entrantTotal = count[0]!.n;
+
+  await db.transaction(async tx => {
+    await tx.update(giveaways).set({ winnerEntrantId: null }).where(eq(giveaways.id, g.id));
+    await tx.delete(bonuses).where(eq(bonuses.giveawayId, g.id));
+    await tx.delete(entrants).where(eq(entrants.giveawayId, g.id));
+    await tx.delete(auditLog).where(eq(auditLog.giveawayId, g.id));
+    await tx.delete(settings).where(inArray(settings.key, [`ig_sync:${g.id}`, `ig_final_sync:${g.id}`]));
+    // Rules and sent announcements go with the giveaway (ON DELETE CASCADE).
+    await tx.delete(giveaways).where(eq(giveaways.id, g.id));
+    await tx.insert(auditLog).values({
+      giveawayId: null,
+      actorId,
+      action: 'giveaway.deleted',
+      details: { id: g.id, name: g.name, slug: g.slug, startsAt: g.startsAt, endsAt: g.endsAt, entrants: entrantTotal },
+    });
+  });
+  return { entrants: entrantTotal };
 }
 
 export async function setGiveawayPost(giveawayId: number, mediaId: string | null, postedAt: Date | null, permalink: string | null) {

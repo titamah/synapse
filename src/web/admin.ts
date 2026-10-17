@@ -15,6 +15,7 @@ import {
   audit,
   auditRows,
   closeGiveaway,
+  deleteGiveaway,
   entrantCount,
   entrantReport,
   findOverlap,
@@ -341,6 +342,23 @@ export function createAdminRouter(client?: Client) {
     if (!closed) return void res.status(409).json({ error: 'Already closed' });
     inBackground(runFinalSync(closed));
     res.json(await giveawayJson(closed));
+  });
+
+  // Permanent delete. Open giveaways must be closed first; ones with entrants need ?confirm=<giveaway name>.
+  router.delete('/giveaways/:id', requireActor, async (req: Req, res) => {
+    const g = req.giveaway!;
+    if (statusOf(g) === 'open') return void res.status(409).json({ error: 'Close this giveaway before deleting it.' });
+    const entrantsSoFar = await entrantCount(g.id);
+    const confirm = typeof req.query.confirm === 'string' ? req.query.confirm.trim() : '';
+    if (entrantsSoFar > 0 && confirm !== (g.name ?? g.slug)) {
+      return void res.status(400).json({
+        error: `This giveaway has ${entrantsSoFar} entrant${entrantsSoFar === 1 ? '' : 's'}. To delete it and all their entries, add ?confirm=<giveaway name> (exactly "${g.name ?? g.slug}").`,
+        requiresConfirm: true,
+        entrants: entrantsSoFar,
+      });
+    }
+    const result = await deleteGiveaway(g, req.actor!);
+    res.json({ deleted: true, id: g.id, name: g.name, entrants: result.entrants });
   });
 
   // "Sync now": read the post's comments immediately and return the result.

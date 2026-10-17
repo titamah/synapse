@@ -184,10 +184,26 @@ const capped = await api('POST', '/giveaways', {
   announcements: null, testMode: null, winnerNotify: null, claimHours: null,
 });
 ok('create with nulls everywhere → 201 with defaults', capped.status === 201 && capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0, capped.json);
+ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}`)).status === 409);
 const cg = await svc.getOpenGiveaway();
 await svc.submitEntry({ giveaway: cg, discordId: 'a', discordUsername: 'a', values: {} });
 await svc.submitEntry({ giveaway: cg, discordId: 'b', discordUsername: 'b', values: {} });
 ok('cap reached → closes automatically', (await svc.getOpenGiveaway()) === null && (await svc.getGiveaway(cg.id)).closeReason === 'cap');
+
+// Delete: closed giveaway with entrants needs ?confirm=<name>.
+const noConfirm = await api('DELETE', `/giveaways/${gid}`);
+ok('delete with entrants, no confirm → 400 requiresConfirm', noConfirm.status === 400 && noConfirm.json.requiresConfirm === true && noConfirm.json.entrants === 2, noConfirm.json);
+ok('delete with wrong confirm → 400', (await api('DELETE', `/giveaways/${gid}?confirm=nope`)).status === 400);
+const del = await api('DELETE', `/giveaways/${gid}?confirm=${encodeURIComponent('Test Giveaway')}`);
+ok('delete with confirm → 200', del.status === 200 && del.json.deleted === true && del.json.entrants === 2, del.json);
+ok('deleted giveaway → 404', (await api('GET', `/giveaways/${gid}`)).status === 404);
+const leftovers = (await pool.query(
+  `SELECT (SELECT count(*) FROM entrants WHERE giveaway_id=$1) + (SELECT count(*) FROM bonuses WHERE giveaway_id=$1)
+        + (SELECT count(*) FROM giveaway_rules WHERE giveaway_id=$1) + (SELECT count(*) FROM audit_log WHERE giveaway_id=$1) AS n`, [gid])).rows[0].n;
+ok('nothing left behind', Number(leftovers) === 0, leftovers);
+const summary = (await pool.query(`SELECT * FROM audit_log WHERE action='giveaway.deleted' AND details->>'id' = $1`, [String(gid)])).rows[0];
+ok('deletion summary kept in audit log', summary?.actor_id === 'admin:tester@bostonblerds.com' && summary.details.entrants === 2, summary);
+ok('GTA giveaway untouched', (await api('GET', '/giveaways/1')).status === 200);
 
 srv.close();
 await pool.end();

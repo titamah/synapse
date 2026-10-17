@@ -77,6 +77,7 @@ An action counts under the **most specific** rule (narrowest window) that still 
 | GET | `/giveaways/:id` | — | `Giveaway` |
 | PATCH | `/giveaways/:id` | Any create fields | `Giveaway` |
 | POST | `/giveaways/:id/close` | — | `Giveaway` (closes early) |
+| DELETE | `/giveaways/:id?confirm=<name>` | — | `{ deleted, id, name, entrants }`. **Permanent:** removes the giveaway and all its entrants, entries, rules and history. `409` if it's open (close it first). If it has entrants, `confirm` must equal the giveaway's exact name, otherwise `400` with `requiresConfirm: true` and the entrant count, which is handy for a "type the name to delete" dialog. |
 | GET | `/giveaways/:id/entrants` | — | `{ entrants: Entrant[], unmatched: Bonus[] }` |
 | POST | `/giveaways/:id/bonuses` | `{ entrantId, label }` | `201 Bonus` (manual entry) |
 | DELETE | `/giveaways/:id/bonuses/:bonusId` | `{ reason? }` | `Bonus` (removed) |
