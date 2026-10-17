@@ -44,14 +44,16 @@ export function createWebServer() {
   // Every comment / story mention event. The raw body is kept for signature checking.
   app.post('/webhooks/instagram', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
     const rawBody = req.body as Buffer;
-    if (!env.IG_APP_SECRET) {
-      console.warn('Instagram webhook rejected: IG_APP_SECRET not set');
+    const secrets = [env.IG_APP_SECRET, env.META_APP_SECRET].filter((s): s is string => !!s);
+    if (!secrets.length) {
+      console.warn('Instagram webhook rejected: no app secret configured');
       res.sendStatus(503);
       return;
     }
-    const signatureValid = validMetaSignature(rawBody, req.get('x-hub-signature-256'), env.IG_APP_SECRET);
+    const header = req.get('x-hub-signature-256');
+    const signatureValid = secrets.some(secret => validMetaSignature(rawBody, header, secret));
     if (!signatureValid) {
-      console.warn(`Instagram webhook rejected: bad signature (header ${req.get('x-hub-signature-256') ? 'present' : 'missing'})`);
+      console.warn(`Instagram webhook rejected: bad signature (header ${header ? 'present' : 'missing'})`);
       res.sendStatus(401);
       return;
     }

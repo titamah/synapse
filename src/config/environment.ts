@@ -18,6 +18,8 @@ const envSchema = z.object({
   IG_VERIFY_TOKEN: z.string().optional().transform(v => v || undefined),
   // From the Meta app dashboard; used to check webhook signatures. Unset until the app exists.
   IG_APP_SECRET: z.string().optional().transform(v => v || undefined),
+  // The Meta app's main secret (App settings → Basic). Meta may sign Instagram webhooks with either one.
+  META_APP_SECRET: z.string().optional().transform(v => v || undefined),
 
   DATABASE_URL: z.string().min(1, 'Database URL is required'),
 
