@@ -30,7 +30,8 @@ Node.js + TypeScript · discord.js · Postgres + Drizzle · Docker Compose
    ```
    On boot the bot runs database migrations and registers its slash commands with your server.
 
-> Only one copy of the bot should run per Discord token. Stop your local bot before testing against the same server as production.
+> Only one copy of the bot can run per Discord token. For local development, use the separate **BB-Bot Dev** app:
+> put its token in `.env.dev` (gitignored), start the database with `docker compose up -d db`, then run `npm run dev`.
 
 ### Database changes
 

@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Synapse: member platform for Boston Blerds. BB-Bot is its Discord interface.",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "DOTENV_CONFIG_PATH=.env.dev tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
