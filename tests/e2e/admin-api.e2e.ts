@@ -200,6 +200,11 @@ const capped = await api('POST', '/giveaways', {
   formFields: null, rules: null, entryChannel: null, igPost: null, reminderText: null,
   announcements: null, testMode: null, winnerNotify: null, claimHours: null,
 });
+const winnerSettings = await api('POST', '/giveaways', {
+  name: 'Winner Settings', startsAt: '2027-03-01T12:00:00-05:00', endsAt: '2027-03-02T12:00:00-05:00', testMode: true,
+  winnerCount: 2, winnerSelect: 'auto', winnerNotify: 'auto', notifyDelayMinutes: 1, winnerMessage: 'Hi {name}', claimHours: 3,
+});
+ok('create keeps winner settings', winnerSettings.status === 201 && winnerSettings.json.winnerCount === 2 && winnerSettings.json.winnerSelect === 'auto' && winnerSettings.json.notifyDelayMinutes === 1 && winnerSettings.json.winnerMessage === 'Hi {name}', winnerSettings.json);
 ok('create with nulls everywhere → 201 with defaults', capped.status === 201 && capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0, capped.json);
 ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}?confirm=Capped`)).status === 409);
 const cg = await svc.getOpenGiveaway();

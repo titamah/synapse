@@ -256,7 +256,11 @@ export function createAdminRouter(client?: Client) {
           maxParticipants: input.maxParticipants ?? null,
           ...(input.announcements ? { announcements: input.announcements } : {}),
           testMode: input.testMode ?? false,
+          winnerCount: input.winnerCount ?? 1,
+          winnerSelect: input.winnerSelect ?? 'manual',
           winnerNotify: input.winnerNotify ?? 'manual',
+          notifyDelayMinutes: input.notifyDelayMinutes ?? 30,
+          winnerMessage: input.winnerMessage ?? null,
           claimHours: input.claimHours ?? 12,
         })
         .returning();
@@ -463,6 +467,19 @@ export function createAdminRouter(client?: Client) {
     if (!openSlots(g.winnerCount, (await listWinners(g.id)).map(w => w.status))) return `All ${g.winnerCount} winner slot(s) are filled. Resolve a winner first, or raise winnerCount.`;
     return null;
   }
+
+  // Deprecated alias for older dashboard code: same as POST /giveaways/:id/winners (manual pick).
+  router.post('/giveaways/:id/winner', requireActor, async (req: Req, res) => {
+    const g = req.giveaway!;
+    const body = z.object({ entrantId: z.number().int() }).safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: 'entrantId is required' });
+    const problem = await canSelect(g);
+    if (problem) return void res.status(409).json({ error: problem });
+    const pick = (await eligiblePool(g, client)).find(p => p.entrant.id === body.data.entrantId);
+    if (!pick) return void res.status(400).json({ error: "That entrant can't win: disqualified, left the server, or already picked." });
+    const w = await selectWinner(client, g, pick.entrant, req.actor!);
+    res.json({ winner: pick.entrant, record: w });
+  });
 
   // Manual pick from the entrants list.
   router.post('/giveaways/:id/winners', requireActor, async (req: Req, res) => {
