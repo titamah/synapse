@@ -1,6 +1,14 @@
+# Cap each container's logs at ~30 MB (3 files x 10 MB), keeping the most recent.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   bot:
     build: .
+    logging: *logging
     restart: unless-stopped
     env_file: .env
     environment:
@@ -17,6 +25,7 @@ services:
   # without opening any ports. Only runs where COMPOSE_PROFILES=tunnel is set (the production .env).
   tunnel:
     image: cloudflare/cloudflared:latest
+    logging: *logging
     restart: unless-stopped
     command: tunnel --no-autoupdate run
     environment:
@@ -27,6 +36,7 @@ services:
 
   db:
     image: postgres:18
+    logging: *logging
     restart: unless-stopped
     volumes:
       - db-data:/var/lib/postgresql
