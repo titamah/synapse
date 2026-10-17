@@ -118,6 +118,8 @@ Set the giveaway's post with **`igPost`** on create or edit: a post link (`https
 | GET | `/instagram/posts?limit=12` | Post picker: `{ id, permalink, caption, mediaType, thumbnailUrl, postedAt, commentsCount }[]`, newest first. Thumbnail URLs expire after a while; don't store them. |
 | GET | `/instagram/resolve?url=<link>` | The post for a link (preview before saving), or `404` |
 | POST | `/giveaways/:id/sync` | "Sync now": reads comments immediately, returns `{ igSync }` |
+| GET | `/instagram/status` | Instagram connection health: `{ configured, expiresAt, refreshedAt, lastAttemptAt, lastError }`. The token renews itself weekly; warn if `lastError` is set or `expiresAt` is under 2 weeks away. |
+| POST | `/instagram/renew` | Renew the token now; returns the status |
 
 ### Winners
 ```jsonc

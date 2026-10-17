@@ -1,4 +1,4 @@
-import { env } from '../config/environment.js';
+import { getAccessToken } from './token.js';
 import type { Giveaway } from '../giveaway/service.js';
 
 const GRAPH = 'https://graph.instagram.com/v26.0';
@@ -17,10 +17,12 @@ export type IgPost = {
 };
 
 async function graphGet<T>(pathOrUrl: string, params: Record<string, string> = {}): Promise<T> {
-  if (!env.IG_ACCESS_TOKEN) throw new Error('IG_ACCESS_TOKEN is not set');
+  const token = await getAccessToken();
+  if (!token) throw new Error('IG_ACCESS_TOKEN is not set');
   const url = new URL(pathOrUrl.startsWith('http') ? pathOrUrl : `${GRAPH}${pathOrUrl}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  if (!url.searchParams.has('access_token')) url.searchParams.set('access_token', env.IG_ACCESS_TOKEN);
+  // Paging links already carry a token; always use the current one.
+  url.searchParams.set('access_token', token);
 
   const res = await fetch(url);
   const body = (await res.json()) as T & { error?: { message: string } };

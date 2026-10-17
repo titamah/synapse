@@ -16,6 +16,7 @@ import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
 import { runScheduledSyncs } from './instagram/sync.js';
+import { renewTokenIfDue } from './instagram/token.js';
 import { processPendingInstagramEvents } from './instagram/webhook.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -104,6 +105,7 @@ client.once(Events.ClientReady, async readyClient => {
 const INSTAGRAM_JOB_MS = 30 * 60 * 1000;
 async function runInstagramJob() {
   try {
+    await renewTokenIfDue();
     await runScheduledSyncs();
     await processPendingInstagramEvents();
   } catch (err) {

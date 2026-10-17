@@ -11,6 +11,7 @@ import { serverMemberIds } from '../discord/members.js';
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
 import { hasTagRules } from '../instagram/tags.js';
+import { renewTokenIfDue, tokenStatus } from '../instagram/token.js';
 import { announceExtended } from '../giveaway/announcements.js';
 import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
 import { drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
@@ -407,6 +408,17 @@ export function createAdminRouter(client?: Client) {
     if (!g.igMediaId && !(await hasTagRules(g))) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post (or add a tagged-post rule) first' });
     await runCommentSync(g, 'manual');
     res.json({ igSync: await getSyncStatus(g.id) });
+  });
+
+  // Instagram connection health: token expiry and renewal (never the token itself).
+  router.get('/instagram/status', async (_req, res) => {
+    res.json(await tokenStatus());
+  });
+
+  // Renew the token now instead of waiting for the weekly renewal.
+  router.post('/instagram/renew', requireActor, async (_req, res) => {
+    await renewTokenIfDue(true);
+    res.json(await tokenStatus());
   });
 
   // Post picker: @BostonBlerds' recent posts with thumbnails.
