@@ -1,7 +1,7 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { webhookEvents } from '../db/schema.js';
-import { GIVEAWAY, addBonus, normalizeIg } from '../giveaway/service.js';
+import { giveaways, webhookEvents } from '../db/schema.js';
+import { awardAction, getOpenGiveaway, normalizeIg, statusOf, type Giveaway } from '../giveaway/service.js';
 import { getUsernameForSender, knownGiveawayPost, type GiveawayPost } from './api.js';
 import { processComment } from './comments.js';
 
@@ -40,67 +40,74 @@ export function filterInstagramPayload(payload: Payload, giveawayMediaId: string
   return entry.length ? { ...payload, entry } : null;
 }
 
-async function processStoryMention(m: Messaging, post: GiveawayPost) {
+async function processStoryMention(g: Giveaway, post: GiveawayPost, m: Messaging) {
   const senderId = m.sender?.id;
   // Our own account mentioning itself, or a malformed event.
-  if (!senderId || senderId === m.recipient?.id) return 'skipped';
+  if (!senderId || senderId === m.recipient?.id || !m.message?.mid) return 'skipped';
   const at = m.timestamp ? new Date(m.timestamp) : new Date();
-  // Only Story mentions from after the giveaway post went up, and before entries close.
+  // Story mentions only count once the giveaway post is up; the rules handle the giveaway's dates.
   if (at < post.postedAt) return 'early';
-  if (at >= GIVEAWAY.closesAt) return 'late';
 
   const username = normalizeIg(await getUsernameForSender(senderId));
-  if (!username || username === GIVEAWAY.igHandle.toLowerCase()) return 'skipped';
-
-  const result = await addBonus({
-    igUsername: username,
-    type: 'STORY',
-    source: 'ig_webhook',
-    actorId: 'system:instagram',
-    ...(m.message?.mid ? { sourceRef: m.message.mid } : {}),
-  });
-  return result.status;
+  if (!username) return 'skipped';
+  return awardAction({ giveaway: g, action: 'ig_story', igUsername: username, at, sourceRef: m.message.mid, source: 'ig_webhook' });
 }
 
 /**
- * Awards bonuses for the comments and Story mentions in a (filtered) payload.
+ * Awards entries for the comments and Story mentions in a (filtered) payload.
  * Comments only count on the giveaway post. Safe to re-run.
  */
-export async function processInstagramPayload(payload: Payload, post: GiveawayPost) {
+export async function processInstagramPayload(payload: Payload, g: Giveaway, post: GiveawayPost) {
   for (const e of payload.entry ?? []) {
     for (const c of e.changes ?? []) {
       const v = c.value;
       if (v?.media?.id === post.id && v?.from?.username && typeof v.text === 'string' && v.id) {
-        await processComment({ id: v.id, username: v.from.username, text: v.text }, 'ig_webhook');
+        const at = e.time ? new Date(e.time * 1000) : new Date();
+        await processComment(g, { id: v.id, username: v.from.username, text: v.text, at }, 'ig_webhook');
       }
     }
     for (const m of e.messaging ?? []) {
-      if (isStoryMention(m)) await processStoryMention(m, post);
+      if (isStoryMention(m)) await processStoryMention(g, post, m);
     }
   }
 }
 
-/** Retries stored events that were never processed (e.g. the bot restarted, or the API call failed). */
-export async function processPendingInstagramEvents() {
-  // Events wait until the giveaway post exists; until then there's nothing to compare against.
-  const post = await knownGiveawayPost();
-  if (!post) return;
+/**
+ * The giveaway that stored events should be checked against: the open one, or one that
+ * closed in the last day (so a restart right after closing doesn't lose late events).
+ */
+async function giveawayForProcessing(): Promise<Giveaway | null> {
+  const open = await getOpenGiveaway();
+  if (open) return open;
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const recent = await db.query.giveaways.findFirst({ where: gt(giveaways.endsAt, dayAgo), orderBy: desc(giveaways.endsAt) });
+  return recent ?? null;
+}
 
+/** Processes stored events that haven't been yet (bot restarted, API call failed, post not found yet). */
+export async function processPendingInstagramEvents() {
   const pending = await db
     .select()
     .from(webhookEvents)
     .where(and(eq(webhookEvents.source, 'instagram'), isNull(webhookEvents.processedAt)))
     .orderBy(webhookEvents.id);
+  if (!pending.length) return;
+
+  const g = await giveawayForProcessing();
+  const post = g ? knownGiveawayPost(g) : null;
+  // An open giveaway whose post isn't up yet: keep waiting.
+  if (g && !post && statusOf(g) === 'open') return;
 
   let done = 0;
   for (const event of pending) {
     try {
-      await processInstagramPayload(event.payload as Payload, post);
+      // No giveaway (or one that closed without a post): nothing can count, so just mark it handled.
+      if (g && post) await processInstagramPayload(event.payload as Payload, g, post);
       await db.update(webhookEvents).set({ processedAt: new Date() }).where(eq(webhookEvents.id, event.id));
       done++;
     } catch (err) {
       console.error(`Webhook event ${event.id} still failing:`, (err as Error).message);
     }
   }
-  if (pending.length) console.log(`Retried ${pending.length} pending webhook events, ${done} processed`);
+  console.log(`Processed ${done}/${pending.length} pending webhook events`);
 }

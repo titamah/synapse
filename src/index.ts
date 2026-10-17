@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { env } from './config/environment.js';
 import { pool, runMigrations } from './db/client.js';
 import { handleGiveawayModal } from './giveaway/interactions.js';
-import { getGiveaway } from './giveaway/service.js';
+import { getOpenGiveaway } from './giveaway/service.js';
 import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
@@ -15,7 +15,6 @@ import { processPendingInstagramEvents } from './instagram/webhook.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 await runMigrations();
-await getGiveaway();
 console.log('Database ready');
 
 const webServer = startWebServer();
@@ -87,7 +86,8 @@ client.once(Events.ClientReady, async readyClient => {
 const INSTAGRAM_JOB_MS = 10 * 60 * 1000;
 async function runInstagramJob() {
   try {
-    const result = await syncComments();
+    const g = await getOpenGiveaway();
+    const result = g?.igHashtag ? await syncComments(g) : null;
     await processPendingInstagramEvents();
     if (result) console.log('Comment sync:', JSON.stringify(result));
   } catch (err) {

@@ -4,6 +4,7 @@ import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
 import { eq } from 'drizzle-orm';
 import { webhookEvents } from '../db/schema.js';
+import { getOpenGiveaway } from '../giveaway/service.js';
 import { knownGiveawayPost } from '../instagram/api.js';
 import { filterInstagramPayload, processInstagramPayload } from '../instagram/webhook.js';
 import { dataDeletionPage, privacyPage } from './pages.js';
@@ -71,7 +72,8 @@ export function createWebServer() {
 
     // Only giveaway-related events are kept; everything else is acknowledged and dropped.
     // Before the giveaway post is found, all comments are kept so they can be checked once it is.
-    const post = await knownGiveawayPost();
+    const g = await getOpenGiveaway();
+    const post = g ? knownGiveawayPost(g) : null;
     const kept = filterInstagramPayload(payload as Parameters<typeof filterInstagramPayload>[0], post?.id ?? null);
     if (!kept) {
       res.sendStatus(200);
@@ -84,9 +86,9 @@ export function createWebServer() {
     console.log('Instagram webhook stored');
 
     // Until the giveaway post is found, events wait; the 10-minute job processes them later.
-    if (!post) return;
+    if (!g || !post) return;
     try {
-      await processInstagramPayload(kept, post);
+      await processInstagramPayload(kept, g, post);
       await db.update(webhookEvents).set({ processedAt: new Date() }).where(eq(webhookEvents.id, event!.id));
     } catch (err) {
       console.error('Instagram webhook processing failed (event kept for retry):', err);

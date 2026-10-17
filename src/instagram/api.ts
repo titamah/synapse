@@ -1,5 +1,5 @@
 import { env } from '../config/environment.js';
-import { GIVEAWAY, getGiveaway, setGiveawayPost } from '../giveaway/service.js';
+import { setGiveawayPost, type Giveaway } from '../giveaway/service.js';
 
 const GRAPH = 'https://graph.instagram.com/v26.0';
 
@@ -35,37 +35,36 @@ export async function getAccount() {
 
 export type GiveawayPost = { id: string; postedAt: Date };
 
-/** The giveaway post if it's already been found (database only, no API call). */
-export async function knownGiveawayPost(): Promise<GiveawayPost | null> {
-  const g = await getGiveaway();
+/** The giveaway's post if it's already been found (no API call). */
+export function knownGiveawayPost(g: Giveaway): GiveawayPost | null {
   return g.igMediaId && g.igPostedAt ? { id: g.igMediaId, postedAt: g.igPostedAt } : null;
 }
 
+export function captionHasHashtag(caption: string | undefined, hashtag: string) {
+  const tag = hashtag.toLowerCase();
+  return !!caption?.toLowerCase().split(/\s+/).some(word => word.replace(/[^\w#]/g, '') === tag);
+}
+
 /**
- * The giveaway post, or null if it hasn't gone up yet. Checked in order: the
- * database (once found, it's saved), the IG_GIVEAWAY_POST override, then
- * @BostonBlerds' recent posts for one whose caption contains the giveaway hashtag.
+ * The giveaway's post, or null if it hasn't gone up yet: the earliest recent
+ * @BostonBlerds post whose caption contains the giveaway's hashtag. Saved once found.
  */
-export async function findGiveawayPost(): Promise<GiveawayPost | null> {
-  const known = await knownGiveawayPost();
-  if (known) return known;
+export async function findGiveawayPost(g: Giveaway): Promise<GiveawayPost | null> {
+  const known = knownGiveawayPost(g);
+  if (known || !g.igHashtag) return known;
 
   type Media = { id: string; caption?: string; permalink: string; timestamp: string };
   const recent = await graphGet<{ data: Media[] }>('/me/media', { fields: 'id,caption,permalink,timestamp', limit: '25' });
-
-  const override = env.IG_GIVEAWAY_POST?.trim();
-  const shortcode = override?.match(/instagram\.com\/(?:p|reel)\/([^/?#]+)/)?.[1];
-  const tag = GIVEAWAY.igHashtag.toLowerCase();
-  const match = override
-    ? recent.data.find(m => m.id === override || (shortcode && m.permalink.includes(`/${shortcode}`)))
-    : recent.data
-        .filter(m => m.caption?.toLowerCase().split(/\s+/).some(word => word.replace(/[^\w#]/g, '') === tag))
-        .sort((x, y) => x.timestamp.localeCompare(y.timestamp))[0];
+  const match = recent.data
+    .filter(m => captionHasHashtag(m.caption, g.igHashtag!))
+    .sort((x, y) => x.timestamp.localeCompare(y.timestamp))[0];
   if (!match) return null;
 
   const post = { id: match.id, postedAt: new Date(match.timestamp) };
-  await setGiveawayPost(post.id, post.postedAt);
-  console.log(`Giveaway post found: ${match.permalink}`);
+  await setGiveawayPost(g.id, post.id, post.postedAt);
+  g.igMediaId = post.id;
+  g.igPostedAt = post.postedAt;
+  console.log(`Giveaway post found for "${g.name}": ${match.permalink}`);
   return post;
 }
 

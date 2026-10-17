@@ -1,16 +1,79 @@
 import { boolean, pgEnum, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
+/** One entry-form field. Discord forms allow up to 5. */
+export type FormField = {
+  id: string;
+  label: string;
+  type: 'ig_username' | 'short_text' | 'long_text' | 'select';
+  required: boolean;
+  placeholder?: string;
+  options?: string[];
+};
+
+export type AnnouncementSettings = {
+  enabled: boolean;
+  milestoneEvery?: number;
+  countdownHours?: number[];
+};
+
+/**
+ * A giveaway campaign. Its status is derived, never stored: scheduled before starts_at,
+ * open until ends_at / closed_at / the participant cap, closed after.
+ */
 export const giveaways = pgTable('giveaways', {
   id: serial('id').primaryKey(),
   slug: text('slug').notNull().unique(),
-  channelId: text('channel_id'),
-  messageId: text('message_id'),
+  name: text('name'),
+  startsAt: timestamp('starts_at', { withTimezone: true }),
+  // Column keeps its original name; it's the giveaway's end time.
+  endsAt: timestamp('closes_at', { withTimezone: true }).notNull(),
+  closedAt: timestamp('closed_at', { withTimezone: true }),
+  closeReason: text('close_reason'),
+  entryChannel: text('entry_channel'),
+  igHashtag: text('ig_hashtag'),
+  formFields: jsonb('form_fields').$type<FormField[]>().notNull().default([]),
+  reminderText: text('reminder_text'),
+  maxParticipants: integer('max_participants'),
+  announcements: jsonb('announcements').$type<AnnouncementSettings>().notNull().default({ enabled: true }),
+  testMode: boolean('test_mode').notNull().default(false),
+  winnerNotify: text('winner_notify').notNull().default('manual'),
+  claimHours: integer('claim_hours').notNull().default(12),
+  winnerEntrantId: integer('winner_entrant_id'),
+  winnerRecordedBy: text('winner_recorded_by'),
+  winnerRecordedAt: timestamp('winner_recorded_at', { withTimezone: true }),
   // The giveaway's Instagram post, found automatically by its caption hashtag.
   igMediaId: text('ig_media_id'),
   igPostedAt: timestamp('ig_posted_at', { withTimezone: true }),
-  closesAt: timestamp('closes_at', { withTimezone: true }).notNull(),
+  // Unused legacy columns, removed in a later cleanup migration.
+  channelId: text('channel_id'),
+  messageId: text('message_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export type RuleAction = 'ig_comment' | 'ig_story';
+export type RuleOptions = { requireTag?: boolean };
+
+/**
+ * How many times an action earns an entry. Optional time window and frequency.
+ * An action is counted under the most specific rule that still has room.
+ */
+export const giveawayRules = pgTable(
+  'giveaway_rules',
+  {
+    id: serial('id').primaryKey(),
+    giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull().default(0),
+    action: text('action').$type<RuleAction>().notNull(),
+    maxCount: integer('max_count').notNull(),
+    windowStart: timestamp('window_start', { withTimezone: true }),
+    windowEnd: timestamp('window_end', { withTimezone: true }),
+    frequency: text('frequency').$type<'day' | 'week'>(),
+    options: jsonb('options').$type<RuleOptions>().notNull().default({}),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  t => [index('giveaway_rules_giveaway_idx').on(t.giveawayId)],
+);
 
 /** One row per person: the base entry. */
 export const entrants = pgTable(
@@ -20,7 +83,9 @@ export const entrants = pgTable(
     giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id),
     discordId: text('discord_id').notNull(),
     discordUsername: text('discord_username').notNull(),
-    igUsername: text('ig_username').notNull(),
+    // Null in Discord-only giveaways.
+    igUsername: text('ig_username'),
+    answers: jsonb('answers').$type<Record<string, string>>().notNull().default({}),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokedBy: text('revoked_by'),
     revokedReason: text('revoked_reason'),
@@ -37,16 +102,22 @@ export const bonusType = pgEnum('bonus_type', ['COMMENT', 'STORY', 'IRL']);
 export const bonusSource = pgEnum('bonus_source', ['admin', 'ig_api', 'ig_webhook', 'posh']);
 
 /**
- * Bonuses are keyed by IG username, not entrant, so a bonus that arrives before
- * someone enters ("unmatched") attaches automatically once they do.
+ * Extra entries earned beyond the base entry. Instagram ones are keyed by IG username,
+ * not entrant, so one that arrives before someone enters ("unmatched") attaches
+ * automatically once they do. Manual ones are given to an entrant directly.
  */
 export const bonuses = pgTable(
   'bonuses',
   {
     id: serial('id').primaryKey(),
     giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id),
-    igUsername: text('ig_username').notNull(),
-    type: bonusType('type').notNull(),
+    action: text('action').$type<RuleAction | 'manual'>(),
+    ruleId: integer('rule_id').references(() => giveawayRules.id, { onDelete: 'set null' }),
+    entrantId: integer('entrant_id').references(() => entrants.id),
+    label: text('label'),
+    igUsername: text('ig_username'),
+    // Legacy fixed type (COMMENT/STORY/IRL), superseded by action + rule_id.
+    type: bonusType('type'),
     source: bonusSource('source').notNull(),
     sourceRef: text('source_ref'),
     createdBy: text('created_by'),
@@ -55,9 +126,32 @@ export const bonuses = pgTable(
     revokedReason: text('revoked_reason'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  // Max 1 of each bonus type per IG account.
-  t => [uniqueIndex('bonuses_giveaway_ig_type_uq').on(t.giveawayId, t.igUsername, t.type)],
+  t => [
+    // The same comment or Story mention can only ever count once.
+    uniqueIndex('bonuses_giveaway_action_ref_uq').on(t.giveawayId, t.action, t.sourceRef),
+    index('bonuses_giveaway_ig_idx').on(t.giveawayId, t.igUsername),
+  ],
 );
+
+/** Discord alerts already sent, so restarts never repeat one. */
+export const announcementsSent = pgTable(
+  'announcements_sent',
+  {
+    id: serial('id').primaryKey(),
+    giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    key: text('key').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  t => [uniqueIndex('announcements_sent_uq').on(t.giveawayId, t.kind, t.key)],
+);
+
+/** Small key-value store, e.g. the auto-renewed Instagram token. */
+export const settings = pgTable('settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const auditLog = pgTable(
   'audit_log',
