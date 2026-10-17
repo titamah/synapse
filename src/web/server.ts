@@ -45,11 +45,13 @@ export function createWebServer() {
   app.post('/webhooks/instagram', express.raw({ type: 'application/json', limit: '1mb' }), async (req, res) => {
     const rawBody = req.body as Buffer;
     if (!env.IG_APP_SECRET) {
+      console.warn('Instagram webhook rejected: IG_APP_SECRET not set');
       res.sendStatus(503);
       return;
     }
     const signatureValid = validMetaSignature(rawBody, req.get('x-hub-signature-256'), env.IG_APP_SECRET);
     if (!signatureValid) {
+      console.warn(`Instagram webhook rejected: bad signature (header ${req.get('x-hub-signature-256') ? 'present' : 'missing'})`);
       res.sendStatus(401);
       return;
     }
@@ -64,6 +66,7 @@ export function createWebServer() {
 
     // Store first, process later: Meta only waits a few seconds for a 200.
     await db.insert(webhookEvents).values({ source: 'instagram', payload, signatureValid });
+    console.log('Instagram webhook stored');
     res.sendStatus(200);
   });
 
