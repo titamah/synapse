@@ -2,7 +2,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { webhookEvents } from '../db/schema.js';
 import { GIVEAWAY, addBonus, normalizeIg } from '../giveaway/service.js';
-import { getUsernameForSender } from './api.js';
+import { getUsernameForSender, knownGiveawayPost, type GiveawayPost } from './api.js';
 import { processComment } from './comments.js';
 
 type Change = { field: string; value: any };
@@ -40,11 +40,14 @@ export function filterInstagramPayload(payload: Payload, giveawayMediaId: string
   return entry.length ? { ...payload, entry } : null;
 }
 
-async function processStoryMention(m: Messaging) {
+async function processStoryMention(m: Messaging, post: GiveawayPost) {
   const senderId = m.sender?.id;
   // Our own account mentioning itself, or a malformed event.
   if (!senderId || senderId === m.recipient?.id) return 'skipped';
-  if (m.timestamp && new Date(m.timestamp) >= GIVEAWAY.closesAt) return 'late';
+  const at = m.timestamp ? new Date(m.timestamp) : new Date();
+  // Only Story mentions from after the giveaway post went up, and before entries close.
+  if (at < post.postedAt) return 'early';
+  if (at >= GIVEAWAY.closesAt) return 'late';
 
   const username = normalizeIg(await getUsernameForSender(senderId));
   if (!username || username === GIVEAWAY.igHandle.toLowerCase()) return 'skipped';
@@ -59,23 +62,30 @@ async function processStoryMention(m: Messaging) {
   return result.status;
 }
 
-/** Awards bonuses for the comments and Story mentions in a (filtered) payload. Safe to re-run. */
-export async function processInstagramPayload(payload: Payload) {
+/**
+ * Awards bonuses for the comments and Story mentions in a (filtered) payload.
+ * Comments only count on the giveaway post. Safe to re-run.
+ */
+export async function processInstagramPayload(payload: Payload, post: GiveawayPost) {
   for (const e of payload.entry ?? []) {
     for (const c of e.changes ?? []) {
       const v = c.value;
-      if (v?.from?.username && typeof v.text === 'string' && v.id) {
+      if (v?.media?.id === post.id && v?.from?.username && typeof v.text === 'string' && v.id) {
         await processComment({ id: v.id, username: v.from.username, text: v.text }, 'ig_webhook');
       }
     }
     for (const m of e.messaging ?? []) {
-      if (isStoryMention(m)) await processStoryMention(m);
+      if (isStoryMention(m)) await processStoryMention(m, post);
     }
   }
 }
 
 /** Retries stored events that were never processed (e.g. the bot restarted, or the API call failed). */
 export async function processPendingInstagramEvents() {
+  // Events wait until the giveaway post exists; until then there's nothing to compare against.
+  const post = await knownGiveawayPost();
+  if (!post) return;
+
   const pending = await db
     .select()
     .from(webhookEvents)
@@ -85,7 +95,7 @@ export async function processPendingInstagramEvents() {
   let done = 0;
   for (const event of pending) {
     try {
-      await processInstagramPayload(event.payload as Payload);
+      await processInstagramPayload(event.payload as Payload, post);
       await db.update(webhookEvents).set({ processedAt: new Date() }).where(eq(webhookEvents.id, event.id));
       done++;
     } catch (err) {

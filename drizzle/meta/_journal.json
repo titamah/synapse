@@ -15,6 +15,13 @@
       "when": 1792194556773,
       "tag": "0001_webhook_events",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792203065353,
+      "tag": "0002_giveaway_post",
+      "breakpoints": true
     }
   ]
 }

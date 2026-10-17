@@ -1,5 +1,5 @@
 import { GIVEAWAY, addBonus, normalizeIg } from '../giveaway/service.js';
-import { getAllComments, getGiveawayMediaId, type IgComment } from './api.js';
+import { findGiveawayPost, getAllComments, type IgComment } from './api.js';
 
 const ACTOR = 'system:instagram';
 const ownHandle = GIVEAWAY.igHandle.toLowerCase();
@@ -23,10 +23,10 @@ export async function processComment(comment: Pick<IgComment, 'id' | 'username' 
 
 /** Reads every comment on the giveaway post and awards any missing comment bonuses. */
 export async function syncComments() {
-  const mediaId = await getGiveawayMediaId();
-  if (!mediaId) return null;
+  const post = await findGiveawayPost();
+  if (!post) return null;
 
-  const comments = await getAllComments(mediaId);
+  const comments = await getAllComments(post.id);
   const counts: Record<string, number> = {};
   for (const c of comments) {
     const outcome = await processComment(c, 'ig_api');

@@ -5,6 +5,9 @@ export const giveaways = pgTable('giveaways', {
   slug: text('slug').notNull().unique(),
   channelId: text('channel_id'),
   messageId: text('message_id'),
+  // The giveaway's Instagram post, found automatically by its caption hashtag.
+  igMediaId: text('ig_media_id'),
+  igPostedAt: timestamp('ig_posted_at', { withTimezone: true }),
   closesAt: timestamp('closes_at', { withTimezone: true }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });

@@ -8,6 +8,8 @@ export const GIVEAWAY = {
   // 10:30 PM Eastern on Nov 20, 2026 (EST, after daylight saving ends).
   closesAt: new Date('2026-11-20T22:30:00-05:00'),
   igHandle: 'BostonBlerds',
+  // The giveaway post is the first @BostonBlerds post whose caption contains this.
+  igHashtag: '#BBxGTAVI',
 } as const;
 
 export const BONUS_TYPES = ['COMMENT', 'STORY', 'IRL'] as const;
@@ -27,6 +29,16 @@ export async function getGiveaway(): Promise<Giveaway> {
     .returning();
   cached = row!;
   return cached;
+}
+
+export async function setGiveawayPost(mediaId: string, postedAt: Date) {
+  const g = await getGiveaway();
+  const [row] = await db
+    .update(giveaways)
+    .set({ igMediaId: mediaId, igPostedAt: postedAt })
+    .where(eq(giveaways.id, g.id))
+    .returning();
+  cached = row!;
 }
 
 export function isClosed(now = new Date()) {

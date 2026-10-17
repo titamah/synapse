@@ -82,29 +82,27 @@ client.once(Events.ClientReady, async readyClient => {
   console.log(`Registered ${client.commands.size} commands`);
 });
 
-// Instagram comments: read the giveaway post every 10 minutes and award any missing comment bonuses.
-// Works without Meta App Review because it only reads @BostonBlerds' own post.
-const COMMENT_SYNC_MS = 10 * 60 * 1000;
-async function runCommentSync() {
+// Instagram, every 10 minutes: look for the giveaway post (until found), process any webhook
+// events that were waiting for it, and re-read all its comments in case a webhook was missed.
+const INSTAGRAM_JOB_MS = 10 * 60 * 1000;
+async function runInstagramJob() {
   try {
     const result = await syncComments();
+    await processPendingInstagramEvents();
     if (result) console.log('Comment sync:', JSON.stringify(result));
   } catch (err) {
-    console.error('Comment sync failed:', (err as Error).message);
+    console.error('Instagram job failed:', (err as Error).message);
   }
 }
-let commentSync: NodeJS.Timeout | undefined;
+let instagramJob: NodeJS.Timeout | undefined;
 if (env.IG_ACCESS_TOKEN) {
-  void processPendingInstagramEvents().catch(err => console.error('Pending webhook retry failed:', err));
-}
-if (env.IG_ACCESS_TOKEN && env.IG_GIVEAWAY_POST) {
-  void runCommentSync();
-  commentSync = setInterval(runCommentSync, COMMENT_SYNC_MS);
+  void runInstagramJob();
+  instagramJob = setInterval(runInstagramJob, INSTAGRAM_JOB_MS);
 }
 
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
-  clearInterval(commentSync);
+  clearInterval(instagramJob);
   webServer.close();
   await client.destroy();
   await pool.end();
