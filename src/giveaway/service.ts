@@ -107,8 +107,11 @@ export async function findOverlap(start: Date, end: Date, excludeId?: number) {
   });
 }
 
-export async function setGiveawayPost(giveawayId: number, mediaId: string, postedAt: Date) {
-  await db.update(giveaways).set({ igMediaId: mediaId, igPostedAt: postedAt }).where(eq(giveaways.id, giveawayId));
+export async function setGiveawayPost(giveawayId: number, mediaId: string | null, postedAt: Date | null, permalink: string | null) {
+  await db
+    .update(giveaways)
+    .set({ igMediaId: mediaId, igPostedAt: postedAt, igPermalink: permalink, updatedAt: new Date() })
+    .where(eq(giveaways.id, giveawayId));
 }
 
 export async function recordWinner(giveawayId: number, entrantId: number, actorId: string) {
@@ -309,6 +312,14 @@ export async function addManualBonus(giveawayId: number, entrantId: number, labe
     .returning();
   await audit(giveawayId, actorId, 'bonus.manual_added', { entrantId, label });
   return bonus;
+}
+
+/** Comment entries currently counted for a giveaway, keyed by comment ID. */
+export async function countedCommentBonuses(giveawayId: number) {
+  return db
+    .select({ id: bonuses.id, sourceRef: bonuses.sourceRef })
+    .from(bonuses)
+    .where(and(eq(bonuses.giveawayId, giveawayId), eq(bonuses.action, 'ig_comment'), isNull(bonuses.revokedAt)));
 }
 
 export async function revokeBonus(giveawayId: number, bonusId: number, actorId: string, reason: string) {

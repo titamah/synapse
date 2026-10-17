@@ -7,6 +7,8 @@ import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
 import { giveawayRules, giveaways } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
+import { listRecentPosts, resolvePost } from '../instagram/api.js';
+import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
 import type { Rule } from '../giveaway/rules.js';
 import {
   addManualBonus,
@@ -66,6 +68,10 @@ const giveawayFields = {
   endsAt: isoDate,
   // null = clear the setting
   entryChannel: z.string().max(100).nullish(),
+  // The giveaway's Instagram post: a link (instagram.com/p/…) or media ID. Can be set any time,
+  // even after the giveaway starts; comments are counted from startsAt. null = clear.
+  igPost: z.string().min(1).max(500).nullish(),
+  // Fallback when no post is set: the first recent post with this hashtag in its caption.
   igHashtag: z.string().regex(/^#\w{1,60}$/, 'a single hashtag like #BBxGTAVI').nullish(),
   reminderText: z.string().max(500).nullish(),
   maxParticipants: z.number().int().min(1).nullish(),
@@ -100,9 +106,8 @@ function crossCheck(merged: {
   const ids = merged.formFields.map(f => f.id);
   if (new Set(ids).size !== ids.length) return 'form field ids must be unique';
   if (merged.formFields.filter(f => f.type === 'ig_username').length > 1) return 'only one Instagram username field allowed';
-  if (merged.rules.some(r => r.action.startsWith('ig_'))) {
-    if (!merged.igHashtag) return 'Instagram rules need igHashtag';
-    if (!merged.formFields.some(f => f.type === 'ig_username')) return 'Instagram rules need an Instagram username field in the form';
+  if (merged.rules.some(r => r.action.startsWith('ig_')) && !merged.formFields.some(f => f.type === 'ig_username')) {
+    return 'Instagram rules need an Instagram username field in the form';
   }
   for (const r of merged.rules) {
     if (r.windowStart && r.windowEnd && r.windowEnd <= r.windowStart) return 'rule windowEnd must be after windowStart';
@@ -134,8 +139,24 @@ async function giveawayJson(g: Giveaway) {
     status: statusOf(g),
     entrantCount: await entrantCount(g.id),
     rules: rules.map(r => ({ ...r, description: describeRule(r) })),
+    // Last Instagram comment read: show a warning when lastError is set.
+    igSync: await getSyncStatus(g.id),
   };
 }
+
+/** Looks up the post for an igPost value. Returns the post, or an HTTP error to send back. */
+async function lookupIgPost(value: string) {
+  try {
+    const post = await resolvePost(value);
+    if (!post) return { error: { status: 400, message: `Couldn't find that post on @BostonBlerds. Paste the post's link (instagram.com/p/…).` } };
+    return { post };
+  } catch (err) {
+    return { error: { status: 502, message: `Instagram didn't respond: ${(err as Error).message}` } };
+  }
+}
+
+/** Runs in the background so the dashboard gets its response right away. */
+const inBackground = (task: Promise<unknown>) => void task.catch(err => console.error('Background task failed:', err));
 
 // ---------------------------------------------------------------------------
 // Router
@@ -191,6 +212,13 @@ export function createAdminRouter(client?: Client) {
     const overlap = await findOverlap(input.startsAt, input.endsAt);
     if (overlap) return void res.status(409).json({ error: `Overlaps with "${overlap.name}". Only one giveaway can run at a time.` });
 
+    let igPost = null;
+    if (input.igPost) {
+      const found = await lookupIgPost(input.igPost);
+      if (found.error) return void res.status(found.error.status).json({ error: found.error.message });
+      igPost = found.post;
+    }
+
     let slug = slugify(input.name) || 'giveaway';
     for (let n = 2; await db.query.giveaways.findFirst({ where: eq(giveaways.slug, slug) }); n++) slug = `${slugify(input.name)}-${n}`;
 
@@ -204,6 +232,9 @@ export function createAdminRouter(client?: Client) {
           endsAt: input.endsAt,
           entryChannel: input.entryChannel ?? null,
           igHashtag: input.igHashtag ?? null,
+          igMediaId: igPost?.id ?? null,
+          igPostedAt: igPost ? new Date(igPost.postedAt) : null,
+          igPermalink: igPost?.permalink ?? null,
           formFields: input.formFields,
           reminderText: input.reminderText ?? null,
           maxParticipants: input.maxParticipants ?? null,
@@ -229,7 +260,8 @@ export function createAdminRouter(client?: Client) {
       }
       return created!;
     });
-    await audit(g.id, req.actor!, 'giveaway.created', { name: g.name });
+    await audit(g.id, req.actor!, 'giveaway.created', { name: g.name, igPost: igPost?.permalink ?? null });
+    if (igPost) inBackground(runCommentSync(g, 'post-set'));
     res.status(201).json(await giveawayJson(g));
   });
 
@@ -261,11 +293,19 @@ export function createAdminRouter(client?: Client) {
       return void res.status(400).json({ error: 'A rule id does not belong to this giveaway' });
     }
 
-    const { rules, ...settings } = input;
+    // undefined = leave the post alone, null = clear it, anything else = look it up.
+    let postChange: { id: string | null; postedAt: Date | null; permalink: string | null } | undefined;
+    if (input.igPost === null) postChange = { id: null, postedAt: null, permalink: null };
+    else if (input.igPost) {
+      const found = await lookupIgPost(input.igPost);
+      if (found.error) return void res.status(found.error.status).json({ error: found.error.message });
+      postChange = { id: found.post.id, postedAt: new Date(found.post.postedAt), permalink: found.post.permalink };
+    }
+
+    const { rules, igPost: _igPost, ...settings } = input;
     await db.transaction(async tx => {
       const changes = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined));
-      // A new hashtag means a different post: forget the one found for the old hashtag.
-      if (input.igHashtag !== undefined && input.igHashtag !== g.igHashtag) Object.assign(changes, { igMediaId: null, igPostedAt: null });
+      if (postChange) Object.assign(changes, { igMediaId: postChange.id, igPostedAt: postChange.postedAt, igPermalink: postChange.permalink });
       await tx.update(giveaways).set({ ...changes, updatedAt: new Date() }).where(eq(giveaways.id, g.id));
 
       if (rules) {
@@ -289,14 +329,45 @@ export function createAdminRouter(client?: Client) {
         }
       }
     });
-    await audit(g.id, req.actor!, 'giveaway.updated', { fields: Object.keys(input) });
-    res.json(await giveawayJson((await getGiveaway(g.id))!));
+    await audit(g.id, req.actor!, 'giveaway.updated', { fields: Object.keys(input), ...(postChange ? { igPost: postChange.permalink } : {}) });
+    const updated = (await getGiveaway(g.id))!;
+    // A new post: read its comments now instead of waiting for the next scheduled read.
+    if (postChange?.id && postChange.id !== g.igMediaId) inBackground(runCommentSync(updated, 'post-set'));
+    res.json(await giveawayJson(updated));
   });
 
   router.post('/giveaways/:id/close', requireActor, async (req: Req, res) => {
     const closed = await closeGiveaway(req.giveaway!.id, req.actor!, 'early');
     if (!closed) return void res.status(409).json({ error: 'Already closed' });
+    inBackground(runFinalSync(closed));
     res.json(await giveawayJson(closed));
+  });
+
+  // "Sync now": read the post's comments immediately and return the result.
+  router.post('/giveaways/:id/sync', requireActor, async (req: Req, res) => {
+    const g = req.giveaway!;
+    if (!g.igMediaId && !g.igHashtag) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post first' });
+    await runCommentSync(g, 'manual');
+    res.json({ igSync: await getSyncStatus(g.id) });
+  });
+
+  // Post picker: @BostonBlerds' recent posts with thumbnails.
+  router.get('/instagram/posts', async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 12, 1), 50);
+    try {
+      res.json(await listRecentPosts(limit));
+    } catch (err) {
+      res.status(502).json({ error: `Instagram didn't respond: ${(err as Error).message}` });
+    }
+  });
+
+  // Paste a link → the post (or a clear error), e.g. to preview it before saving.
+  router.get('/instagram/resolve', async (req, res) => {
+    const url = typeof req.query.url === 'string' ? req.query.url : '';
+    if (!url) return void res.status(400).json({ error: 'Pass ?url=<Instagram post link or media ID>' });
+    const found = await lookupIgPost(url);
+    if (found.error) return void res.status(found.error.status === 400 ? 404 : found.error.status).json({ error: found.error.message });
+    res.json(found.post);
   });
 
   router.get('/giveaways/:id/entrants', async (req: Req, res) => {

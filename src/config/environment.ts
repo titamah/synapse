@@ -9,9 +9,6 @@ const envSchema = z.object({
   // Members with a role of this name (case-insensitive) can use every slash command.
   ADMIN_ROLE_NAME: z.string().min(1).default('admin'),
 
-  // /giveaway enter only works in the channel with this name.
-  GIVEAWAY_CHANNEL_NAME: z.string().min(1).default('gta-giveaway'),
-
   // Web server for webhooks (reached through the Cloudflare Tunnel).
   PORT: z.coerce.number().int().default(3000),
   // Any random string; entered in the Meta app's webhook settings so Meta can verify our endpoint.

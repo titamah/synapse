@@ -41,9 +41,10 @@ export const giveaways = pgTable('giveaways', {
   winnerEntrantId: integer('winner_entrant_id'),
   winnerRecordedBy: text('winner_recorded_by'),
   winnerRecordedAt: timestamp('winner_recorded_at', { withTimezone: true }),
-  // The giveaway's Instagram post, found automatically by its caption hashtag.
+  // The giveaway's Instagram post: set from a link in the dashboard, or found by its caption hashtag.
   igMediaId: text('ig_media_id'),
   igPostedAt: timestamp('ig_posted_at', { withTimezone: true }),
+  igPermalink: text('ig_permalink'),
   // Unused legacy columns, removed in a later cleanup migration.
   channelId: text('channel_id'),
   messageId: text('message_id'),

@@ -82,8 +82,10 @@ const testGiveaway = {
 };
 
 ok('create without X-Admin-User → 400', (await api('POST', '/giveaways', testGiveaway, { actor: null })).status === 400);
-const noTag = await api('POST', '/giveaways', { ...testGiveaway, igHashtag: null });
-ok('IG rules without hashtag → 400', noTag.status === 400 && /igHashtag/.test(noTag.json.error), noTag.json);
+const noIgField = await api('POST', '/giveaways', { ...testGiveaway, formFields: [testGiveaway.formFields[1]] });
+ok('IG rules without an IG username field → 400', noIgField.status === 400 && /Instagram username field/.test(noIgField.json.error), noIgField.json);
+const badLink = await api('GET', '/instagram/resolve?url=not-a-link');
+ok('resolve: garbage link → 404 with a clear message', badLink.status === 404 && /instagram\.com\/p/.test(badLink.json.error), badLink.json);
 const badDates = await api('POST', '/giveaways', { ...testGiveaway, endsAt: iso(now - 2 * 60 * 60e3) });
 ok('end before start → 400', badDates.status === 400, badDates.json);
 

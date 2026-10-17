@@ -3,7 +3,18 @@ import { setGiveawayPost, type Giveaway } from '../giveaway/service.js';
 
 const GRAPH = 'https://graph.instagram.com/v26.0';
 
-export type IgComment = { id: string; username: string; text: string; timestamp: string };
+export type IgComment = { id: string; username: string; text: string; timestamp: string; hidden?: boolean };
+
+export type IgPost = {
+  id: string;
+  permalink: string;
+  caption: string | null;
+  mediaType: string;
+  /** Image to show in the post picker (the cover frame for videos). Instagram's URLs expire after a while. */
+  thumbnailUrl: string | null;
+  postedAt: string;
+  commentsCount: number;
+};
 
 async function graphGet<T>(pathOrUrl: string, params: Record<string, string> = {}): Promise<T> {
   if (!env.IG_ACCESS_TOKEN) throw new Error('IG_ACCESS_TOKEN is not set');
@@ -17,62 +28,122 @@ async function graphGet<T>(pathOrUrl: string, params: Record<string, string> = {
   return body;
 }
 
-/** Follows `paging.next` links until every item has been read. */
-async function getAll<T>(path: string, params: Record<string, string>): Promise<T[]> {
+type Page<T> = { data: T[]; paging?: { next?: string } };
+
+/** Follows `paging.next` links until every item has been read (or `max` items). */
+async function getAll<T>(path: string, params: Record<string, string>, max = Infinity): Promise<T[]> {
   const items: T[] = [];
-  let page = await graphGet<{ data: T[]; paging?: { next?: string } }>(path, params);
+  let page = await graphGet<Page<T>>(path, params);
   items.push(...page.data);
-  while (page.paging?.next) {
-    page = await graphGet(page.paging.next);
+  while (page.paging?.next && items.length < max) {
+    page = await graphGet<Page<T>>(page.paging.next);
     items.push(...page.data);
   }
-  return items;
+  return items.slice(0, max);
 }
 
 export async function getAccount() {
   return graphGet<{ user_id: string; username: string }>('/me', { fields: 'user_id,username' });
 }
 
+// ---------------------------------------------------------------------------
+// Posts
+
+const POST_FIELDS = 'id,permalink,caption,media_type,media_url,thumbnail_url,timestamp,comments_count';
+type RawPost = {
+  id: string;
+  permalink: string;
+  caption?: string;
+  media_type: string;
+  media_url?: string;
+  thumbnail_url?: string;
+  timestamp: string;
+  comments_count?: number;
+};
+
+function toPost(m: RawPost): IgPost {
+  return {
+    id: m.id,
+    permalink: m.permalink,
+    caption: m.caption ?? null,
+    mediaType: m.media_type,
+    thumbnailUrl: m.thumbnail_url ?? (m.media_type === 'VIDEO' ? null : (m.media_url ?? null)),
+    postedAt: m.timestamp,
+    commentsCount: m.comments_count ?? 0,
+  };
+}
+
+/** @BostonBlerds' most recent posts, newest first. */
+export async function listRecentPosts(limit = 12): Promise<IgPost[]> {
+  const raw = await getAll<RawPost>('/me/media', { fields: POST_FIELDS, limit: String(Math.min(limit, 50)) }, limit);
+  return raw.map(toPost);
+}
+
+/** The short code in an Instagram link, e.g. "DeU57Lun84l" from instagram.com/p/DeU57Lun84l/?igsh=… */
+export function parseShortcode(link: string): string | null {
+  return link.match(/instagram\.com\/(?:[\w.]+\/)?(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/)?.[1] ?? null;
+}
+
+/**
+ * Finds one of @BostonBlerds' posts from a link or a media ID. Instagram can't look a post up
+ * by its link, so this matches the link's short code against the account's posts (newest 200).
+ */
+export async function resolvePost(input: string): Promise<IgPost | null> {
+  const value = input.trim();
+  if (/^\d+$/.test(value)) {
+    try {
+      return toPost(await graphGet<RawPost>(`/${value}`, { fields: POST_FIELDS }));
+    } catch {
+      return null;
+    }
+  }
+  const shortcode = parseShortcode(value);
+  if (!shortcode) return null;
+  const posts = await getAll<RawPost>('/me/media', { fields: POST_FIELDS, limit: '50' }, 200);
+  const match = posts.find(m => parseShortcode(m.permalink) === shortcode);
+  return match ? toPost(match) : null;
+}
+
 export type GiveawayPost = { id: string; postedAt: Date };
 
-/** The giveaway's post if it's already been found (no API call). */
+/** The giveaway's post if it's already been set or found (no API call). */
 export function knownGiveawayPost(g: Giveaway): GiveawayPost | null {
   return g.igMediaId && g.igPostedAt ? { id: g.igMediaId, postedAt: g.igPostedAt } : null;
 }
 
-export function captionHasHashtag(caption: string | undefined, hashtag: string) {
+export function captionHasHashtag(caption: string | null | undefined, hashtag: string) {
   const tag = hashtag.toLowerCase();
   return !!caption?.toLowerCase().split(/\s+/).some(word => word.replace(/[^\w#]/g, '') === tag);
 }
 
 /**
- * The giveaway's post, or null if it hasn't gone up yet: the earliest recent
- * @BostonBlerds post whose caption contains the giveaway's hashtag. Saved once found.
+ * The giveaway's post: the one set in the dashboard, or (fallback) the earliest recent
+ * @BostonBlerds post whose caption contains the giveaway's hashtag, saved once found.
  */
 export async function findGiveawayPost(g: Giveaway): Promise<GiveawayPost | null> {
   const known = knownGiveawayPost(g);
   if (known || !g.igHashtag) return known;
 
-  type Media = { id: string; caption?: string; permalink: string; timestamp: string };
-  const recent = await graphGet<{ data: Media[] }>('/me/media', { fields: 'id,caption,permalink,timestamp', limit: '25' });
-  const match = recent.data
-    .filter(m => captionHasHashtag(m.caption, g.igHashtag!))
-    .sort((x, y) => x.timestamp.localeCompare(y.timestamp))[0];
+  const match = (await listRecentPosts(25))
+    .filter(p => captionHasHashtag(p.caption, g.igHashtag!))
+    .sort((x, y) => x.postedAt.localeCompare(y.postedAt))[0];
   if (!match) return null;
 
-  const post = { id: match.id, postedAt: new Date(match.timestamp) };
-  await setGiveawayPost(g.id, post.id, post.postedAt);
-  g.igMediaId = post.id;
-  g.igPostedAt = post.postedAt;
-  console.log(`Giveaway post found for "${g.name}": ${match.permalink}`);
+  const post = { id: match.id, postedAt: new Date(match.postedAt) };
+  await setGiveawayPost(g.id, post.id, post.postedAt, match.permalink);
+  Object.assign(g, { igMediaId: post.id, igPostedAt: post.postedAt, igPermalink: match.permalink });
+  console.log(`Giveaway post found for "${g.name}" by hashtag: ${match.permalink}`);
   return post;
 }
 
-/** Every comment and reply on a post. */
+// ---------------------------------------------------------------------------
+// Comments and users
+
+/** Every comment and reply on a post, including whether it's hidden. */
 export async function getAllComments(mediaId: string): Promise<IgComment[]> {
   type Raw = IgComment & { replies?: { data: IgComment[] } };
   const top = await getAll<Raw>(`/${mediaId}/comments`, {
-    fields: 'id,username,text,timestamp,replies{id,username,text,timestamp}',
+    fields: 'id,username,text,timestamp,hidden,replies{id,username,text,timestamp,hidden}',
     limit: '50',
   });
   return top.flatMap(({ replies, ...c }) => [c, ...(replies?.data ?? [])]);

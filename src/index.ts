@@ -5,11 +5,10 @@ import { fileURLToPath } from 'url';
 import { env } from './config/environment.js';
 import { pool, runMigrations } from './db/client.js';
 import { handleGiveawayModal } from './giveaway/interactions.js';
-import { getOpenGiveaway } from './giveaway/service.js';
 import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
-import { syncComments } from './instagram/comments.js';
+import { runScheduledSyncs } from './instagram/sync.js';
 import { processPendingInstagramEvents } from './instagram/webhook.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -90,15 +89,14 @@ client.once(Events.ClientReady, async readyClient => {
   }
 });
 
-// Instagram, every 10 minutes: look for the giveaway post (until found), process any webhook
-// events that were waiting for it, and re-read all its comments in case a webhook was missed.
-const INSTAGRAM_JOB_MS = 10 * 60 * 1000;
+// Instagram, every 30 minutes: re-read the giveaway post's comments (catches anything a webhook
+// missed and removes entries for deleted comments), do a final read for giveaways that just
+// closed, and process webhook events that were waiting for the post to be set.
+const INSTAGRAM_JOB_MS = 30 * 60 * 1000;
 async function runInstagramJob() {
   try {
-    const g = await getOpenGiveaway();
-    const result = g?.igHashtag ? await syncComments(g) : null;
+    await runScheduledSyncs();
     await processPendingInstagramEvents();
-    if (result) console.log('Comment sync:', JSON.stringify(result));
   } catch (err) {
     console.error('Instagram job failed:', (err as Error).message);
   }
