@@ -3,6 +3,7 @@ import express from 'express';
 import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
 import { webhookEvents } from '../db/schema.js';
+import { dataDeletionPage, privacyPage } from './pages.js';
 
 /** Constant-time check of Meta's X-Hub-Signature-256 header against the raw body. */
 function validMetaSignature(rawBody: Buffer, header: string | undefined, secret: string): boolean {
@@ -18,6 +19,14 @@ export function createWebServer() {
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get('/privacy', (_req, res) => {
+    res.type('html').send(privacyPage);
+  });
+
+  app.get('/data-deletion', (_req, res) => {
+    res.type('html').send(dataDeletionPage);
   });
 
   // Meta calls this once when you save the webhook URL in the app dashboard.
