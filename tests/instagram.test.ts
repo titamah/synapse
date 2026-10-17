@@ -6,7 +6,7 @@ process.env.CLIENT_ID ??= 'x';
 process.env.SERVER_ID ??= 'x';
 process.env.DATABASE_URL ??= 'postgresql://x@localhost:1/x';
 
-const { parseShortcode, captionHasHashtag } = await import('../src/instagram/api.js');
+const { parseShortcode, captionHasHashtag, toComment } = await import('../src/instagram/api.js');
 const { commentsToRevoke, tagsAFriend } = await import('../src/instagram/comments.js');
 
 test('parseShortcode: post, reel, share params, profile-style links', () => {
@@ -37,4 +37,11 @@ test('tagsAFriend: needs someone other than BB or the commenter', () => {
   assert.equal(tagsAFriend('jay', 'yo @kia_b'), true);
   assert.equal(tagsAFriend('jay', '@BostonBlerds pick me'), false);
   assert.equal(tagsAFriend('jay', '@jay lol'), false);
+});
+
+test('toComment: real Instagram shape (username under from, sticker comments without text)', () => {
+  const c = toComment({ id: '1', timestamp: '2026-10-13T21:53:05+0000', hidden: false, from: { id: '9', username: 'faith.fit.blerd' } });
+  assert.deepEqual(c, { id: '1', username: 'faith.fit.blerd', text: '', timestamp: '2026-10-13T21:53:05+0000', hidden: false });
+  assert.equal(toComment({ id: '2', text: 'hi', timestamp: 't' })?.username ?? null, null);
+  assert.equal(toComment({ id: '3', text: 'hi', timestamp: 't', username: 'old_shape' })?.username, 'old_shape');
 });

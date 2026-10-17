@@ -139,14 +139,36 @@ export async function findGiveawayPost(g: Giveaway): Promise<GiveawayPost | null
 // ---------------------------------------------------------------------------
 // Comments and users
 
+type RawComment = {
+  id: string;
+  text?: string;
+  timestamp: string;
+  hidden?: boolean;
+  username?: string;
+  from?: { id: string; username?: string };
+};
+
+/**
+ * Instagram puts the commenter under `from.username` (not `username`), and GIF or
+ * sticker-only comments have no text. Returns null if there's no username at all.
+ */
+export function toComment(c: RawComment): IgComment | null {
+  const username = c.from?.username ?? c.username;
+  if (!username) return null;
+  return { id: c.id, username, text: c.text ?? '', timestamp: c.timestamp, hidden: c.hidden ?? false };
+}
+
 /** Every comment and reply on a post, including whether it's hidden. */
 export async function getAllComments(mediaId: string): Promise<IgComment[]> {
-  type Raw = IgComment & { replies?: { data: IgComment[] } };
+  type Raw = RawComment & { replies?: { data: RawComment[] } };
   const top = await getAll<Raw>(`/${mediaId}/comments`, {
-    fields: 'id,username,text,timestamp,hidden,replies{id,username,text,timestamp,hidden}',
+    fields: 'id,text,timestamp,hidden,from,username,replies{id,text,timestamp,hidden,from,username}',
     limit: '50',
   });
-  return top.flatMap(({ replies, ...c }) => [c, ...(replies?.data ?? [])]);
+  return top
+    .flatMap(({ replies, ...c }) => [c, ...(replies?.data ?? [])])
+    .map(toComment)
+    .filter((c): c is IgComment => c !== null);
 }
 
 /** Story mentions only include the sender's Instagram-scoped ID; this looks up their username. */
