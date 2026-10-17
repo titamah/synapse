@@ -9,6 +9,7 @@ import { getGiveaway } from './giveaway/service.js';
 import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
+import { syncComments } from './instagram/comments.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,8 +81,26 @@ client.once(Events.ClientReady, async readyClient => {
   console.log(`Registered ${client.commands.size} commands`);
 });
 
+// Instagram comments: read the giveaway post every 10 minutes and award any missing comment bonuses.
+// Works without Meta App Review because it only reads @BostonBlerds' own post.
+const COMMENT_SYNC_MS = 10 * 60 * 1000;
+async function runCommentSync() {
+  try {
+    const result = await syncComments();
+    if (result) console.log('Comment sync:', JSON.stringify(result));
+  } catch (err) {
+    console.error('Comment sync failed:', (err as Error).message);
+  }
+}
+let commentSync: NodeJS.Timeout | undefined;
+if (env.IG_ACCESS_TOKEN && env.IG_GIVEAWAY_POST) {
+  void runCommentSync();
+  commentSync = setInterval(runCommentSync, COMMENT_SYNC_MS);
+}
+
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
+  clearInterval(commentSync);
   webServer.close();
   await client.destroy();
   await pool.end();

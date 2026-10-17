@@ -21,6 +21,11 @@ const envSchema = z.object({
   // The Meta app's main secret (App settings → Basic). Meta may sign Instagram webhooks with either one.
   META_APP_SECRET: z.string().optional().transform(v => v || undefined),
 
+  // @BostonBlerds' long-lived access token (Meta dashboard → Generate access tokens). Expires after 60 days.
+  IG_ACCESS_TOKEN: z.string().optional().transform(v => v || undefined),
+  // The giveaway post: its link (https://www.instagram.com/p/...) or media ID.
+  IG_GIVEAWAY_POST: z.string().optional().transform(v => v || undefined),
+
   DATABASE_URL: z.string().min(1, 'Database URL is required'),
 
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

@@ -2,7 +2,10 @@ import crypto from 'crypto';
 import express from 'express';
 import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
+import { eq } from 'drizzle-orm';
 import { webhookEvents } from '../db/schema.js';
+import { getGiveawayMediaId } from '../instagram/api.js';
+import { filterInstagramPayload, processInstagramPayload } from '../instagram/webhook.js';
 import { dataDeletionPage, privacyPage } from './pages.js';
 
 /** Constant-time check of Meta's X-Hub-Signature-256 header against the raw body. */
@@ -66,10 +69,28 @@ export function createWebServer() {
       return;
     }
 
-    // Store first, process later: Meta only waits a few seconds for a 200.
-    await db.insert(webhookEvents).values({ source: 'instagram', payload, signatureValid });
-    console.log('Instagram webhook stored');
+    // Only giveaway-related events are kept; everything else is acknowledged and dropped.
+    const mediaId = await getGiveawayMediaId().catch(err => {
+      console.error('Could not resolve giveaway post:', err.message);
+      return null;
+    });
+    const kept = filterInstagramPayload(payload as Parameters<typeof filterInstagramPayload>[0], mediaId);
+    if (!kept) {
+      res.sendStatus(200);
+      return;
+    }
+
+    // Store first, then answer Meta (it only waits a few seconds), then process.
+    const [event] = await db.insert(webhookEvents).values({ source: 'instagram', payload: kept, signatureValid }).returning();
     res.sendStatus(200);
+    console.log('Instagram webhook stored');
+
+    try {
+      await processInstagramPayload(kept);
+      await db.update(webhookEvents).set({ processedAt: new Date() }).where(eq(webhookEvents.id, event!.id));
+    } catch (err) {
+      console.error('Instagram webhook processing failed (event kept for retry):', err);
+    }
   });
 
   return app;
