@@ -75,10 +75,19 @@ client.once(Events.ClientReady, async readyClient => {
 
   // Registering on every boot keeps Discord in sync with the code; guild commands update instantly.
   const rest = new REST({ version: '10' }).setToken(env.DISCORD_TOKEN);
-  await rest.put(Routes.applicationGuildCommands(env.CLIENT_ID, env.SERVER_ID), {
-    body: client.commands.map(c => c.data.toJSON()),
-  });
-  console.log(`Registered ${client.commands.size} commands`);
+  try {
+    await rest.put(Routes.applicationGuildCommands(env.CLIENT_ID, env.SERVER_ID), {
+      body: client.commands.map(c => c.data.toJSON()),
+    });
+    console.log(`Registered ${client.commands.size} commands`);
+  } catch (err) {
+    // Keep running (webhooks, the admin API and jobs don't need slash commands).
+    const e = err as { code?: number; message?: string };
+    console.error(
+      `Could not register slash commands: ${e.message ?? err}` +
+        (e.code === 50001 ? ' — re-invite the bot with the "applications.commands" scope.' : ''),
+    );
+  }
 });
 
 // Instagram, every 10 minutes: look for the giveaway post (until found), process any webhook
