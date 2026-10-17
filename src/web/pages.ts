@@ -11,16 +11,32 @@ function layout(title: string, body: string) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Boston Blerds</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700;800&display=swap" rel="stylesheet">
 <style>
-  :root { --bg: #ffffff; --fg: #1a1a1a; --muted: #5c5c5c; --accent: #b8860b; --rule: #e5e5e5; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #111111; --fg: #f0f0f0; --muted: #a8a8a8; --accent: #ffcc00; --rule: #2a2a2a; } }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, sans-serif; }
+  /* Brand: Electric Yellow (#FFFF00) + Barlow. Yellow is too light for text on white,
+     so light mode uses it for the top bar and link underlines; dark mode uses it for text. */
+  :root {
+    --yellow: #ffff00;
+    --bg: #ffffff; --fg: #141414; --muted: #5c5c5c; --rule: #e5e5e5;
+    --link: #141414; --link-underline: var(--yellow); --code-bg: #f2f2f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0d0d; --fg: #f2f2f2; --muted: #a8a8a8; --rule: #2a2a2a;
+      --link: var(--yellow); --link-underline: transparent; --code-bg: #1c1c1c;
+    }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.6 'Barlow', system-ui, sans-serif; border-top: 6px solid var(--yellow); }
   main { max-width: 720px; margin: 0 auto; padding: 48px 16px 64px; }
-  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 4px; }
-  h2 { font-size: 1.15rem; margin: 32px 0 8px; }
-  p, li { color: var(--fg); }
-  .muted { color: var(--muted); font-size: .9rem; }
-  a { color: var(--accent); }
+  h1 { font-size: 2.2rem; font-weight: 800; line-height: 1.1; letter-spacing: -0.01em; margin: 0 0 6px; }
+  h2 { font-size: 1.25rem; font-weight: 700; margin: 32px 0 8px; }
+  strong { font-weight: 700; }
+  .muted { color: var(--muted); font-size: .95rem; }
+  a { color: var(--link); font-weight: 500; text-decoration: underline; text-decoration-color: var(--link-underline); text-decoration-thickness: 3px; text-underline-offset: 3px; }
+  @media (prefers-color-scheme: dark) { a { text-decoration-color: currentColor; text-decoration-thickness: 1px; } }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; font-size: .9em; }
   hr { border: 0; border-top: 1px solid var(--rule); margin: 32px 0; }
 </style>
 </head>
