@@ -7,7 +7,7 @@ import {
   type MessageContextMenuCommandInteraction,
 } from 'discord.js';
 import { GIVEAWAY_FOOTER } from '../giveaway/embeds.js';
-import { getGiveaway } from '../giveaway/service.js';
+import { discordChannel, getGiveaway } from '../giveaway/service.js';
 import { isAdmin } from '../lib/permissions.js';
 import { channelName, textChannelByName } from './channels.js';
 
@@ -32,13 +32,14 @@ export async function handlePostToChannel(interaction: MessageContextMenuCommand
     return;
   }
   const g = await getGiveaway(Number(id));
-  if (!g?.entryChannel) {
+  const entryChannel = g ? discordChannel(g) : null;
+  if (!entryChannel) {
     await interaction.reply({ content: "This giveaway doesn't have an entry channel set.", flags: ephemeral });
     return;
   }
-  const channel = await textChannelByName(interaction.client, g.entryChannel);
+  const channel = await textChannelByName(interaction.client, entryChannel);
   if (!channel) {
-    await interaction.reply({ content: `Couldn't find #${channelName(g.entryChannel)}.`, flags: ephemeral });
+    await interaction.reply({ content: `Couldn't find #${channelName(entryChannel)}.`, flags: ephemeral });
     return;
   }
   const posted = await channel.send({ embeds: message.embeds.map(e => EmbedBuilder.from(e)) });

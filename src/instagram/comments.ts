@@ -1,5 +1,5 @@
-import { OWN_IG_HANDLE, awardAction, countedBonuses, normalizeIg, revokeBonus, type Giveaway } from '../giveaway/service.js';
-import { getAllComments, knownGiveawayPost } from './api.js';
+import { OWN_IG_HANDLE, markMissingRemoved, normalizeIg, recordInstagramActivity, type Giveaway } from '../giveaway/service.js';
+import { getAllComments, giveawayPosts } from './api.js';
 
 /** "Tag a friend": the comment @mentions someone other than us or the commenter. */
 export function tagsAFriend(username: string, text: string): boolean {
@@ -7,49 +7,40 @@ export function tagsAFriend(username: string, text: string): boolean {
   return mentions.some(m => m !== OWN_IG_HANDLE && m !== username);
 }
 
-/** Counted comments that are no longer visible on the post (deleted or hidden). */
-export function commentsToRevoke(counted: { id: number; sourceRef: string | null }[], visibleIds: Set<string>) {
-  return counted.filter(b => b.sourceRef && !visibleIds.has(b.sourceRef));
-}
-
-/** Awards an entry for a comment on the giveaway post if a rule has room. Safe to repeat. */
-export async function processComment(
-  g: Giveaway,
-  comment: { id: string; username: string; text: string; at: Date },
-  source: 'ig_api' | 'ig_webhook',
-) {
+/** Records a comment on a giveaway post in the activity log. Whether it counts is up to the rules. */
+export async function processComment(g: Giveaway, comment: { id: string; username: string; text: string; at: Date; mediaId: string }) {
   const username = normalizeIg(comment.username);
   if (!username) return 'invalid-username';
-  return awardAction({
+  return recordInstagramActivity({
     giveaway: g,
-    action: 'ig_comment',
+    action: 'comment',
     igUsername: username,
     at: comment.at,
     sourceRef: comment.id,
-    source,
-    taggedFriend: tagsAFriend(username, comment.text),
+    details: { taggedFriend: tagsAFriend(username, comment.text), mediaId: comment.mediaId },
   });
 }
 
 /**
- * Reads every comment on the giveaway post: removes entries for comments that were deleted
- * or hidden, then awards any missing ones. Only acts on a complete read; if Instagram fails
- * partway, it throws and nothing is changed.
+ * Reads every comment on every giveaway post: records new ones and marks deleted or hidden ones
+ * as removed (so they stop counting). Only acts on a complete read; if Instagram fails partway,
+ * it throws and nothing is changed.
  */
 export async function syncComments(g: Giveaway) {
-  const post = knownGiveawayPost(g);
-  if (!post) return null;
+  const posts = giveawayPosts(g);
+  if (!posts.length) return null;
 
-  const all = await getAllComments(post.id);
-  const visible = all.filter(c => !c.hidden);
-
-  const removed = commentsToRevoke(await countedBonuses(g.id, 'ig_comment'), new Set(visible.map(c => c.id)));
-  for (const b of removed) await revokeBonus(g.id, b.id, 'system:instagram', 'Comment deleted or hidden');
-
-  const counts: Record<string, number> = {};
-  for (const c of visible) {
-    const outcome = await processComment(g, { id: c.id, username: c.username, text: c.text, at: new Date(c.timestamp) }, 'ig_api');
-    counts[outcome] = (counts[outcome] ?? 0) + 1;
+  const counts: Record<string, number> = { posts: posts.length, comments: 0, hidden: 0, removed: 0 };
+  for (const post of posts) {
+    const all = await getAllComments(post.id);
+    const visible = all.filter(c => !c.hidden);
+    counts.comments! += visible.length;
+    counts.hidden! += all.length - visible.length;
+    counts.removed! += await markMissingRemoved(g.id, 'comment', new Set(visible.map(c => c.id)), 'Comment deleted or hidden', a => a.details.mediaId === post.id);
+    for (const c of visible) {
+      const outcome = await processComment(g, { id: c.id, username: c.username, text: c.text, at: new Date(c.timestamp), mediaId: post.id });
+      counts[outcome] = (counts[outcome] ?? 0) + 1;
+    }
   }
-  return { comments: visible.length, hidden: all.length - visible.length, removed: removed.length, ...counts };
+  return counts;
 }

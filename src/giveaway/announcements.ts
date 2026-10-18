@@ -1,7 +1,7 @@
 import type { Client, EmbedBuilder, MessageCreateOptions } from 'discord.js';
-import { and, eq, gt, isNull, or } from 'drizzle-orm';
+import { and, eq, gt, or } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { announcementsSent, bonuses, giveaways } from '../db/schema.js';
+import { announcementsSent, giveaways } from '../db/schema.js';
 import { adminChannel } from '../discord/channels.js';
 import { crossedCapacity, crossedCountdowns, reachedMilestone, resolveAnnouncements } from './announcementRules.js';
 import {
@@ -13,7 +13,7 @@ import {
   milestoneEmbed,
   startedEmbed,
 } from './embeds.js';
-import { entrantCount, statusOf, type Giveaway } from './service.js';
+import { computePeople, participantCount, statusOf, type Giveaway } from './service.js';
 
 /** Starts and closes older than this aren't announced (e.g. right after a long outage or first deploy). */
 const STALE_MS = 2 * 60 * 60 * 1000;
@@ -52,12 +52,10 @@ export async function postOnce(client: Client, g: Giveaway, key: string, message
 
 const withExtend = (g: Giveaway, embed: EmbedBuilder): MessageCreateOptions => ({ embeds: [embed], components: [extendRow(g)] });
 
-async function entryCount(giveawayId: number, entrants: number) {
-  const bonusRows = await db
-    .select({ id: bonuses.id })
-    .from(bonuses)
-    .where(and(eq(bonuses.giveawayId, giveawayId), isNull(bonuses.revokedAt)));
-  return entrants + bonusRows.length;
+/** Eligible people and their total entries, for the "closed" summary. */
+async function closingStats(client: Client, g: Giveaway) {
+  const people = (await computePeople(g, client)).filter(p => p.result.eligible);
+  return { entrants: people.length, entries: people.reduce((sum, p) => sum + p.result.entries.total, 0) };
 }
 
 /** Checks one giveaway and posts whatever updates are due. */
@@ -72,7 +70,7 @@ async function announceFor(client: Client, g: Giveaway, now: Date) {
       await postOnce(client, g, 'started', { embeds: [startedEmbed(g)] });
     }
 
-    const entrants = await entrantCount(g.id);
+    const entrants = await participantCount(g.id);
 
     if (s.countdown.enabled) {
       // Keys include the end time, so extending re-arms the countdown.
@@ -101,8 +99,7 @@ async function announceFor(client: Client, g: Giveaway, now: Date) {
   if (status === 'closed' && s.closed) {
     const closedAt = g.closedAt ?? g.endsAt;
     if (now.getTime() - closedAt.getTime() < STALE_MS) {
-      const entrants = await entrantCount(g.id);
-      await postOnce(client, g, `closed:${closedAt.toISOString()}`, { embeds: [closedEmbed(g, { entrants, entries: await entryCount(g.id, entrants) })] });
+      await postOnce(client, g, `closed:${closedAt.toISOString()}`, { embeds: [closedEmbed(g, await closingStats(client, g))] });
     }
   }
 }

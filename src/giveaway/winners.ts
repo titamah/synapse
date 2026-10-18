@@ -10,14 +10,14 @@ import { and, asc, eq, gt, inArray, isNotNull, lte, or } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { giveaways, winners, type WinnerStatus } from '../db/schema.js';
 import { adminChannel } from '../discord/channels.js';
-import { serverMemberIds } from '../discord/members.js';
 import { postOnce } from './announcements.js';
-import { audit, entrantReport, getGiveaway, setEntrantRevoked, statusOf, type Entrant, type Giveaway } from './service.js';
+import { audit, computePeople, getGiveaway, getRules, setEntrantRevoked, statusOf, type Entrant, type Giveaway, type PersonReport } from './service.js';
+import { ruleLabel } from './labels.js';
 import { openSlots, renderWinnerMessage, weightedPick } from './winnerRules.js';
 
 export type Winner = typeof winners.$inferSelect;
 
-export const WINNER_BUTTON = /^winner:(notify|mark-accepted|mark-declined|accept|decline|decline-confirm):(\d+)$/;
+export const WINNER_BUTTON = /^winner:(notify|mark-accepted|mark-declined|accept|decline|decline-confirm|check-yes|check-no):(\d+)(?::(\d+))?$/;
 
 const GOLD = 0xffcc00;
 const GREEN = 0x2ecc71;
@@ -39,14 +39,12 @@ async function entrantFor(w: Winner): Promise<Entrant> {
   return (await db.query.entrants.findFirst({ where: (e, { eq: eq_ }) => eq_(e.id, w.entrantId) }))!;
 }
 
-/** Who can still win: not disqualified, still in the server (Discord entrants), never picked before. Weighted by entries. */
+/** Who can still win: eligible (every requirement met, per the rules), never picked before. Weighted by entries. */
 export async function eligiblePool(g: Giveaway, client?: Client) {
-  const { entrants } = await entrantReport(g.id);
   const already = new Set((await listWinners(g.id)).map(w => w.entrantId));
-  const members = await serverMemberIds(client);
-  return entrants
-    .filter(e => !e.revokedAt && !already.has(e.id) && (!members || !e.discordId || members.has(e.discordId)))
-    .map(e => ({ entrant: e, weight: e.totalEntries }));
+  return (await computePeople(g, client))
+    .filter(p => p.result.eligible && p.result.entries.total > 0 && !already.has(p.id))
+    .map(p => ({ person: p, weight: p.result.entries.total }));
 }
 
 // ---------------------------------------------------------------------------
@@ -83,40 +81,90 @@ async function postAdmin(client: Client, message: MessageCreateOptions) {
 // ---------------------------------------------------------------------------
 // Flow
 
-/** Records a winner (drawn or picked by an admin) and tells #community-updates what happens next. */
-export async function selectWinner(client: Client | undefined, g: Giveaway, entrant: Entrant & { totalEntries?: number }, selectedBy: string) {
-  const entries = entrant.totalEntries ?? 1;
-  const notifyAt = g.winnerNotify === 'auto' ? new Date(Date.now() + g.notifyDelayMinutes * 60_000) : null;
+/** The "what happens next" post for a winner who's ready to be contacted. */
+async function postReadyToNotify(client: Client, g: Giveaway, w: Winner, entrant: Entrant, intro: string[]) {
+  if (w.notifyAt) {
+    await postAdmin(client, {
+      embeds: [winnerEmbed(g, `🏆 Winner selected for ${g.name}`, [...intro, `They'll be notified by DM ${ts(w.notifyAt, 'R')}.`])],
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`winner:notify:${w.id}`, 'Notify now', ButtonStyle.Primary))],
+    });
+  } else {
+    await postAdmin(client, { embeds: [winnerEmbed(g, `🏆 Winner selected for ${g.name}`, [...intro, 'Reach out to them, then report what they said:'])], components: [reportRow(w)] });
+  }
+}
+
+const notifyTime = (g: Giveaway) => (g.winnerNotify === 'auto' ? new Date(Date.now() + g.notifyDelayMinutes * 60_000) : null);
+
+/**
+ * Records a winner (drawn or picked by an admin). If the giveaway has manual winner checks
+ * (e.g. "follows @BostonBlerds"), the winner waits in "checking" until admins confirm them all;
+ * otherwise they go straight to being notified (after the delay) or reported (manual notify).
+ */
+export async function selectWinner(client: Client | undefined, g: Giveaway, person: PersonReport, selectedBy: string) {
+  const entries = person.result.entries.total;
+  const rules = await getRules(g.id);
+  const checks = person.result.winnerChecks.map(ruleId => ({ ruleId, label: ruleLabel(rules.find(r => r.id === ruleId)!), confirmed: null }));
   const [w] = await db
     .insert(winners)
-    .values({ giveawayId: g.id, entrantId: entrant.id, selectedBy, entriesAtDraw: entries, notifyAt })
+    .values({ giveawayId: g.id, entrantId: person.id, selectedBy, entriesAtDraw: entries, checks, status: checks.length ? 'checking' : 'pending', notifyAt: checks.length ? null : notifyTime(g) })
     .onConflictDoNothing()
     .returning();
   if (!w) return null;
-  await audit(g.id, selectedBy, 'winner.selected', { winnerId: w.id, entrantId: entrant.id, discordUsername: entrant.discordUsername, entries });
+  await audit(g.id, selectedBy, 'winner.selected', { winnerId: w.id, entrantId: person.id, discordUsername: person.discordUsername, entries, checks: checks.length });
 
   if (client?.isReady()) {
     const how = selectedBy === 'auto' ? 'Drawn at random' : `Picked by ${selectedBy.replace(/^admin:/, '')}`;
-    const lines = [`${who(entrant)} · ${entries} entr${entries === 1 ? 'y' : 'ies'} · ${how}.`];
-    if (notifyAt) {
-      lines.push(`They'll be notified by DM ${ts(notifyAt, 'R')}.`);
+    const intro = [`${who(person)} · ${entries} entr${entries === 1 ? 'y' : 'ies'} · ${how}.`];
+    if (checks.length) {
       await postAdmin(client, {
-        embeds: [winnerEmbed(g, `🏆 Winner selected for ${g.name}`, lines)],
-        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(button(`winner:notify:${w.id}`, 'Notify now', ButtonStyle.Primary))],
+        embeds: [winnerEmbed(g, `🔎 Check the winner for ${g.name}`, [...intro, 'Confirm before they are contacted:', ...checks.map(c => `• ${c.label}`)])],
+        components: checks.slice(0, 5).map(c =>
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            button(`winner:check-yes:${w.id}:${c.ruleId}`, `✓ ${c.label}`.slice(0, 80), ButtonStyle.Success),
+            button(`winner:check-no:${w.id}:${c.ruleId}`, '✗ Not met', ButtonStyle.Danger),
+          ),
+        ),
       });
     } else {
-      lines.push('Reach out to them, then report what they said:');
-      await postAdmin(client, { embeds: [winnerEmbed(g, `🏆 Winner selected for ${g.name}`, lines)], components: [reportRow(w)] });
+      await postReadyToNotify(client, g, w, person, intro);
     }
   }
   return w;
+}
+
+/**
+ * An admin confirms (or rejects) one winner check. All confirmed → the winner moves on to being
+ * notified. Any rejected → disqualified and the slot is refilled.
+ */
+export async function confirmWinnerCheck(client: Client | undefined, winnerId: number, ruleId: number, confirmed: boolean, by: string) {
+  const w = await getWinner(winnerId);
+  if (!w || w.status !== 'checking') return { ok: false as const, error: 'This winner is not waiting on checks.' };
+  const check = w.checks.find(c => c.ruleId === ruleId);
+  if (!check) return { ok: false as const, error: 'No such check for this winner.' };
+
+  const checks = w.checks.map(c => (c.ruleId === ruleId ? { ...c, confirmed, by, at: new Date().toISOString() } : c));
+  const g = (await getGiveaway(w.giveawayId))!;
+  await audit(g.id, by, 'winner.check', { winnerId, ruleId, label: check.label, confirmed });
+
+  if (!confirmed) {
+    await db.update(winners).set({ checks }).where(eq(winners.id, w.id));
+    return resolveWinner(client, winnerId, 'declined', by, `Didn't meet: ${check.label}`);
+  }
+  const allDone = checks.every(c => c.confirmed === true);
+  const [updated] = await db
+    .update(winners)
+    .set({ checks, ...(allDone ? { status: 'pending' as const, notifyAt: notifyTime(g) } : {}) })
+    .where(eq(winners.id, w.id))
+    .returning();
+  if (allDone && client?.isReady()) await postReadyToNotify(client, g, updated!, await entrantFor(updated!), [`${who(await entrantFor(updated!))}: all checks confirmed.`]);
+  return { ok: true as const, winner: updated! };
 }
 
 /** Draws one winner at random, weighted by entries. Returns null if nobody is left to draw. */
 export async function drawWinner(client: Client | undefined, g: Giveaway, selectedBy = 'auto') {
   const pick = weightedPick(await eligiblePool(g, client));
   if (!pick) return null;
-  return selectWinner(client, g, pick.entrant, selectedBy);
+  return selectWinner(client, g, pick.person, selectedBy);
 }
 
 /** Sends the winner their DM with Accept/Decline. If their DMs are closed, admins take over. */
@@ -170,7 +218,7 @@ export async function notifyWinner(client: Client, winnerId: number, by = 'auto'
 
 const ALLOWED: Record<'accepted' | 'declined' | 'expired', WinnerStatus[]> = {
   accepted: ['pending', 'notified', 'unreachable'],
-  declined: ['pending', 'notified', 'unreachable'],
+  declined: ['checking', 'pending', 'notified', 'unreachable'],
   expired: ['notified'],
 };
 
@@ -178,7 +226,7 @@ const ALLOWED: Record<'accepted' | 'declined' | 'expired', WinnerStatus[]> = {
  * Accepted, declined or ran out of time. Declined/expired winners keep their place in the
  * history but are disqualified, and the slot is refilled (auto draw or a prompt to admins).
  */
-export async function resolveWinner(client: Client | undefined, winnerId: number, outcome: 'accepted' | 'declined' | 'expired', by: string) {
+export async function resolveWinner(client: Client | undefined, winnerId: number, outcome: 'accepted' | 'declined' | 'expired', by: string, reason?: string) {
   const w = await getWinner(winnerId);
   if (!w || !ALLOWED[outcome].includes(w.status)) return { ok: false as const, error: 'This winner was already resolved.' };
   const [updated] = await db
@@ -192,7 +240,7 @@ export async function resolveWinner(client: Client | undefined, winnerId: number
   const entrant = await entrantFor(w);
   await audit(g.id, by, `winner.${outcome}`, { winnerId: w.id, entrantId: entrant.id });
   if (outcome !== 'accepted') {
-    await setEntrantRevoked(g.id, entrant.id, by, outcome === 'declined' ? 'Declined the prize' : "Didn't claim the prize in time");
+    await setEntrantRevoked(g.id, entrant.id, by, reason ?? (outcome === 'declined' ? 'Declined the prize' : "Didn't claim the prize in time"));
   }
 
   if (client?.isReady()) {
@@ -209,7 +257,7 @@ export async function resolveWinner(client: Client | undefined, winnerId: number
     const lines =
       outcome === 'accepted'
         ? [`${who(entrant)} accepted their prize for **${g.name}**. 🎉`]
-        : [`${who(entrant)} ${outcome === 'declined' ? 'declined' : "didn't accept in time"}. Their entries are disqualified.`];
+        : [`${who(entrant)} ${reason ?? (outcome === 'declined' ? 'declined' : "didn't accept in time")}. Their entries are disqualified.`];
     await postAdmin(client, { embeds: [winnerEmbed(g, titles[outcome], lines, outcome === 'accepted' ? GREEN : RED)] });
     if (outcome !== 'accepted') await fillOpenSlots(client, g);
   }

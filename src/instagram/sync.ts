@@ -3,6 +3,7 @@ import { db } from '../db/client.js';
 import { giveaways } from '../db/schema.js';
 import { getSetting, setSetting } from '../db/settings.js';
 import { getOpenGiveaway, statusOf, type Giveaway } from '../giveaway/service.js';
+import { giveawayPosts } from './api.js';
 import { syncComments } from './comments.js';
 import { hasTagRules, syncTaggedPosts } from './tags.js';
 
@@ -64,18 +65,18 @@ export async function runFinalSync(g: Giveaway) {
 /** Every 30 minutes: the open giveaway, plus a final read for any that closed in the last 2 days. */
 export async function runScheduledSyncs() {
   const open = await getOpenGiveaway();
-  if (open && (open.igMediaId || (await hasTagRules(open)))) await runCommentSync(open, 'scheduled');
+  if (open && (giveawayPosts(open).length || (await hasTagRules(open)))) await runCommentSync(open, 'scheduled');
 
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
   const recentlyClosed = await db.query.giveaways.findMany({
     where: and(
-      or(isNotNull(giveaways.igMediaId), isNotNull(giveaways.startsAt)),
+      isNotNull(giveaways.startsAt),
       or(and(isNotNull(giveaways.closedAt), gt(giveaways.closedAt, twoDaysAgo)), and(lte(giveaways.endsAt, new Date()), gt(giveaways.endsAt, twoDaysAgo))),
     ),
     orderBy: desc(giveaways.endsAt),
   });
   for (const g of recentlyClosed) {
-    if (statusOf(g) === 'closed' && (g.igMediaId || (await hasTagRules(g)))) await runFinalSync(g);
+    if (statusOf(g) === 'closed' && (giveawayPosts(g).length || (await hasTagRules(g)))) await runFinalSync(g);
   }
 }
 

@@ -1,11 +1,25 @@
+import type { Client } from 'discord.js';
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { auditLog, bonuses, entrants, giveawayRules, giveaways, settings, type FormField, type RuleAction } from '../db/schema.js';
-import { chooseRule, type Rule } from './rules.js';
+import {
+  activities,
+  auditLog,
+  entrants,
+  giveawayRules,
+  giveaways,
+  overrides,
+  settings,
+  type FormField,
+  type Platform,
+  type RuleAction,
+} from '../db/schema.js';
+import { serverMemberIds } from '../discord/members.js';
+import { evaluatePerson, type EngineOverride, type EngineResult, type EngineRule } from './engine.js';
 
 export type Giveaway = typeof giveaways.$inferSelect;
 export type Entrant = typeof entrants.$inferSelect;
-export type Bonus = typeof bonuses.$inferSelect;
+export type Activity = typeof activities.$inferSelect;
+export type Override = typeof overrides.$inferSelect;
 export type GiveawayStatus = 'scheduled' | 'open' | 'closed';
 
 /** Our own Instagram account: never earns entries, and tagging it doesn't count as tagging a friend. */
@@ -40,14 +54,26 @@ export function statusOf(g: Giveaway, now = new Date()): GiveawayStatus {
   return 'open';
 }
 
-/** Does this giveaway take entries through /giveaway enter? */
-export const acceptsDiscord = (g: Giveaway) => g.entryMethods.includes('discord');
-/** Does a person's first counted Instagram action enter them? */
-export const acceptsInstagram = (g: Giveaway) => g.entryMethods.includes('instagram');
-
 export async function audit(giveawayId: number | null, actorId: string, action: string, details: Record<string, unknown> = {}) {
   await db.insert(auditLog).values({ giveawayId, actorId, action, details });
 }
+
+/** Is a form field the Instagram username field? (v2 "account" field, or the v1 name.) */
+export const isInstagramField = (f: FormField) => f.type === 'ig_username' || (f.type === 'account' && !!f.platforms?.includes('instagram'));
+
+export const hasRule = (rules: EngineRule[], platform: Platform, action?: RuleAction) =>
+  rules.some(r => r.platform === platform && (!action || r.action === action));
+
+/** Does this giveaway take entries through /giveaway enter (a Discord "enter" rule, required or bonus)? */
+export const takesDiscordEntries = (rules: EngineRule[]) => hasRule(rules, 'discord', 'enter');
+
+/** When the giveaway's first Instagram post went up (Story mentions count from then). */
+export function firstPostAt(g: Giveaway): Date | null {
+  const times = (g.platformSettings.instagram?.posts ?? []).map(p => new Date(p.postedAt).getTime()).filter(t => !Number.isNaN(t));
+  return times.length ? new Date(Math.min(...times)) : null;
+}
+
+export const discordChannel = (g: Giveaway) => g.platformSettings.discord?.channel ?? null;
 
 // ---------------------------------------------------------------------------
 // Giveaways
@@ -60,7 +86,7 @@ export async function listGiveaways() {
   return db.select().from(giveaways).orderBy(desc(giveaways.startsAt));
 }
 
-export async function getRules(giveawayId: number): Promise<Rule[]> {
+export async function getRules(giveawayId: number): Promise<(EngineRule & { giveawayId: number })[]> {
   return db
     .select()
     .from(giveawayRules)
@@ -68,11 +94,16 @@ export async function getRules(giveawayId: number): Promise<Rule[]> {
     .orderBy(asc(giveawayRules.position), asc(giveawayRules.id));
 }
 
-export async function entrantCount(giveawayId: number) {
+/**
+ * People counted against the cap and for milestones: those who entered on Discord when the
+ * giveaway takes Discord entries, otherwise everyone with activity. Disqualified people don't count.
+ */
+export async function participantCount(giveawayId: number, rules?: EngineRule[]) {
+  const r = rules ?? (await getRules(giveawayId));
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(entrants)
-    .where(and(eq(entrants.giveawayId, giveawayId), isNull(entrants.revokedAt)));
+    .where(and(eq(entrants.giveawayId, giveawayId), isNull(entrants.revokedAt), takesDiscordEntries(r) ? isNotNull(entrants.discordId) : undefined));
   return row!.n;
 }
 
@@ -83,7 +114,7 @@ export async function getOpenGiveaway(now = new Date()): Promise<Giveaway | null
     orderBy: asc(giveaways.startsAt),
   });
   if (!g) return null;
-  if (g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) {
+  if (g.maxParticipants && (await participantCount(g.id)) >= g.maxParticipants) {
     await closeGiveaway(g.id, 'system', 'cap');
     return null;
   }
@@ -146,23 +177,19 @@ export async function findOverlap(start: Date, end: Date, excludeId?: number) {
 }
 
 /**
- * Permanently deletes a giveaway and everything under it: entrants, bonus entries, rules,
- * sent announcements, audit history and sync status. Leaves one summary row in the
+ * Permanently deletes a giveaway and everything under it: people, activity, overrides, rules,
+ * winners, sent announcements, audit history and sync status. Leaves one summary row in the
  * general audit log. Callers must check it isn't open.
  */
 export async function deleteGiveaway(g: Giveaway, actorId: string) {
-  const count = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(entrants)
-    .where(eq(entrants.giveawayId, g.id));
-  const entrantTotal = count[0]!.n;
+  const [count] = await db.select({ n: sql<number>`count(*)::int` }).from(entrants).where(eq(entrants.giveawayId, g.id));
+  const entrantTotal = count!.n;
 
   await db.transaction(async tx => {
-    await tx.delete(bonuses).where(eq(bonuses.giveawayId, g.id));
+    // People take their overrides and winner rows with them; activity, rules and announcements go with the giveaway.
     await tx.delete(entrants).where(eq(entrants.giveawayId, g.id));
     await tx.delete(auditLog).where(eq(auditLog.giveawayId, g.id));
     await tx.delete(settings).where(inArray(settings.key, [`ig_sync:${g.id}`, `ig_final_sync:${g.id}`]));
-    // Rules and sent announcements go with the giveaway (ON DELETE CASCADE).
     await tx.delete(giveaways).where(eq(giveaways.id, g.id));
     await tx.insert(auditLog).values({
       giveawayId: null,
@@ -174,15 +201,8 @@ export async function deleteGiveaway(g: Giveaway, actorId: string) {
   return { entrants: entrantTotal };
 }
 
-export async function setGiveawayPost(giveawayId: number, mediaId: string | null, postedAt: Date | null, permalink: string | null) {
-  await db
-    .update(giveaways)
-    .set({ igMediaId: mediaId, igPostedAt: postedAt, igPermalink: permalink, updatedAt: new Date() })
-    .where(eq(giveaways.id, giveawayId));
-}
-
 // ---------------------------------------------------------------------------
-// Entries
+// People and the Discord entry form
 
 export async function getEntrantByDiscord(giveawayId: number, discordId: string) {
   return db.query.entrants.findFirst({ where: and(eq(entrants.giveawayId, giveawayId), eq(entrants.discordId, discordId)) });
@@ -200,8 +220,10 @@ export type EntryResult =
   | { status: 'created' | 'updated' | 'unchanged'; entrant: Entrant };
 
 /**
- * Saves or updates someone's entry from the entry form. Enforces: one entry per Discord
- * account, one Discord account per IG username, required fields, and the participant cap.
+ * Saves or updates someone's entry from the Discord form and records the Discord "enter"
+ * activity. Enforces: one entry per Discord account, one Discord account per IG username,
+ * required fields, and the participant cap. Someone already active on Instagram with the same
+ * username gets linked rather than duplicated.
  */
 export async function submitEntry(input: {
   giveaway: Giveaway;
@@ -210,7 +232,8 @@ export async function submitEntry(input: {
   values: Record<string, string>;
 }): Promise<EntryResult> {
   const g = input.giveaway;
-  if (statusOf(g) !== 'open' || !acceptsDiscord(g)) return { status: 'closed' };
+  const rules = await getRules(g.id);
+  if (statusOf(g) !== 'open' || !takesDiscordEntries(rules)) return { status: 'closed' };
 
   let igUsername: string | null = null;
   const answers: Record<string, string> = {};
@@ -220,7 +243,7 @@ export async function submitEntry(input: {
       if (field.required) return { status: 'invalid', field };
       continue;
     }
-    if (field.type === 'ig_username') {
+    if (isInstagramField(field)) {
       igUsername = normalizeIg(value);
       if (!igUsername) return { status: 'invalid', field };
     } else if (field.type === 'select' && field.options && !field.options.includes(value)) {
@@ -235,7 +258,7 @@ export async function submitEntry(input: {
 
   if (igUsername) {
     let owner = await getEntrantByIg(g.id, igUsername);
-    // Discord + Instagram giveaways: someone who already entered through Instagram is now linking Discord.
+    // Someone already active on Instagram (no Discord yet) is now entering with that username: link them.
     if (owner && owner.discordId === null) {
       if (owner.revokedAt) return { status: 'revoked', entrant: owner };
       owner = await linkInstagramEntrant(g, owner, existing, input.discordId, input.discordUsername);
@@ -251,11 +274,12 @@ export async function submitEntry(input: {
     }
   }
 
-  if (existing && existing.igUsername === igUsername && JSON.stringify(existing.answers) === JSON.stringify(answers)) {
+  const hasEntered = existing ? !!(await db.query.activities.findFirst({ where: and(eq(activities.giveawayId, g.id), eq(activities.platform, 'discord'), eq(activities.action, 'enter'), eq(activities.discordId, input.discordId)) })) : false;
+  if (existing && hasEntered && existing.igUsername === igUsername && JSON.stringify(existing.answers) === JSON.stringify(answers)) {
     return { status: 'unchanged', entrant: existing };
   }
 
-  if (!existing && g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) {
+  if (!hasEntered && g.maxParticipants && (await participantCount(g.id, rules)) >= g.maxParticipants) {
     await closeGiveaway(g.id, 'system', 'cap');
     return { status: 'full' };
   }
@@ -268,7 +292,7 @@ export async function submitEntry(input: {
         .set({ igUsername, answers, discordUsername: input.discordUsername, updatedAt: new Date() })
         .where(eq(entrants.id, existing.id))
         .returning()) as [Entrant];
-      await audit(g.id, input.discordId, 'entry.updated', {
+      await audit(g.id, input.discordId, hasEntered ? 'entry.updated' : 'entry.created', {
         from: { igUsername: existing.igUsername, answers: existing.answers },
         to: { igUsername, answers },
       });
@@ -285,21 +309,26 @@ export async function submitEntry(input: {
     throw err;
   }
 
+  await db
+    .insert(activities)
+    .values({ giveawayId: g.id, platform: 'discord', action: 'enter', discordId: input.discordId, sourceRef: input.discordId, at: new Date() })
+    .onConflictDoNothing();
+
   // The entry that fills the last spot closes the giveaway.
-  if (!existing && g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) {
+  if (!hasEntered && g.maxParticipants && (await participantCount(g.id, rules)) >= g.maxParticipants) {
     await closeGiveaway(g.id, 'system', 'cap');
   }
-  return { status: existing ? 'updated' : 'created', entrant };
+  return { status: hasEntered ? 'updated' : 'created', entrant };
 }
 
 /**
- * Links an Instagram-only entrant to the Discord account that just entered with the same IG
- * username. If that Discord account already had its own entry, the two are merged into one.
+ * Links an Instagram-only person to the Discord account that just entered with the same IG
+ * username. If that Discord account already had its own row, the two are merged into one.
  */
 async function linkInstagramEntrant(g: Giveaway, igEntrant: Entrant, discordEntrant: Entrant | undefined, discordId: string, discordUsername: string) {
   return db.transaction(async tx => {
     if (discordEntrant && discordEntrant.id !== igEntrant.id) {
-      await tx.update(bonuses).set({ entrantId: igEntrant.id }).where(eq(bonuses.entrantId, discordEntrant.id));
+      await tx.update(overrides).set({ entrantId: igEntrant.id }).where(eq(overrides.entrantId, discordEntrant.id));
       await tx.delete(entrants).where(eq(entrants.id, discordEntrant.id));
     }
     const [linked] = await tx
@@ -324,147 +353,153 @@ export async function setEntrantRevoked(giveawayId: number, entrantId: number, a
 }
 
 // ---------------------------------------------------------------------------
-// Bonus entries
+// Activity log
 
-export type AwardResult = 'awarded' | 'no-rule' | 'duplicate' | 'own-account' | 'full' | 'disqualified';
+export type RecordResult = 'recorded' | 'duplicate' | 'own-account' | 'full';
 
 /**
- * Records an Instagram action and awards an entry if a rule has room for it.
- * Safe to call repeatedly for the same comment or Story (deduplicated by sourceRef).
+ * Records one Instagram action in the activity log (safe to repeat; deduplicated by sourceRef)
+ * and makes sure the person exists. Whether it counts is decided later by the engine.
  */
-export async function awardAction(input: {
+export async function recordInstagramActivity(input: {
   giveaway: Giveaway;
-  action: RuleAction;
+  action: 'comment' | 'story' | 'tag';
   igUsername: string;
   at: Date;
   sourceRef: string;
-  source: 'ig_api' | 'ig_webhook';
-  taggedFriend?: boolean;
-  caption?: string;
-}): Promise<AwardResult> {
+  details?: Record<string, unknown>;
+}): Promise<RecordResult> {
   if (input.igUsername === OWN_IG_HANDLE) return 'own-account';
-  // Re-read so a giveaway closed or edited moments ago is respected.
-  const g = (await getGiveaway(input.giveaway.id)) ?? input.giveaway;
-
-  const already = await db.query.bonuses.findFirst({
-    where: and(eq(bonuses.giveawayId, g.id), eq(bonuses.action, input.action), eq(bonuses.sourceRef, input.sourceRef)),
-  });
-  if (already) return 'duplicate';
-
-  // Instagram-entry giveaways: a new person's first counted action enters them, if there's room.
-  const person = await getEntrantByIg(g.id, input.igUsername);
-  if (person?.revokedAt) return 'disqualified';
-  const createsEntrant = !person && acceptsInstagram(g);
-  if (createsEntrant && g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) return 'full';
-
-  const prior = await db
-    .select({ ruleId: bonuses.ruleId, at: bonuses.createdAt })
-    .from(bonuses)
-    .where(and(eq(bonuses.giveawayId, g.id), eq(bonuses.igUsername, input.igUsername), isNull(bonuses.revokedAt)));
-
-  const rule = chooseRule(
-    await getRules(g.id),
-    {
-      action: input.action,
-      at: input.at,
-      ...(input.taggedFriend !== undefined ? { taggedFriend: input.taggedFriend } : {}),
-      ...(input.caption !== undefined ? { caption: input.caption } : {}),
-    },
-    { start: g.startsAt ?? g.createdAt, end: g.closedAt ?? g.endsAt },
-    prior,
-  );
-  if (!rule) return 'no-rule';
+  const g = input.giveaway;
 
   const inserted = await db
-    .insert(bonuses)
-    .values({
-      giveawayId: g.id,
-      action: input.action,
-      ruleId: rule.id,
-      igUsername: input.igUsername,
-      source: input.source,
-      sourceRef: input.sourceRef,
-      createdBy: 'system:instagram',
-      createdAt: input.at,
-    })
+    .insert(activities)
+    .values({ giveawayId: g.id, platform: 'instagram', action: input.action, igUsername: input.igUsername, sourceRef: input.sourceRef, at: input.at, details: input.details ?? {} })
     .onConflictDoNothing()
     .returning();
-  if (!inserted.length) return 'duplicate';
+  if (!inserted.length) {
+    // Seen before: if it had been marked removed (e.g. hidden, then unhidden), it counts again.
+    await db
+      .update(activities)
+      .set({ removedAt: null, removedReason: null })
+      .where(and(eq(activities.giveawayId, g.id), eq(activities.platform, 'instagram'), eq(activities.action, input.action), eq(activities.sourceRef, input.sourceRef), isNotNull(activities.removedAt)));
+    return 'duplicate';
+  }
 
-  await audit(g.id, 'system:instagram', 'bonus.awarded', { igUsername: input.igUsername, action: input.action, ruleId: rule.id });
-
-  if (createsEntrant) {
+  if (!(await getEntrantByIg(g.id, input.igUsername))) {
+    const rules = await getRules(g.id);
+    // A giveaway that doesn't take Discord entries is capped on these people; others only on Discord entries.
+    if (!takesDiscordEntries(rules) && g.maxParticipants && (await participantCount(g.id, rules)) >= g.maxParticipants) return 'full';
     const created = await db.insert(entrants).values({ giveawayId: g.id, igUsername: input.igUsername }).onConflictDoNothing().returning();
     if (created.length) {
-      await audit(g.id, 'system:instagram', 'entry.created', { igUsername: input.igUsername, via: input.action });
-      if (g.maxParticipants && (await entrantCount(g.id)) >= g.maxParticipants) await closeGiveaway(g.id, 'system', 'cap');
+      await audit(g.id, 'system:instagram', 'person.created', { igUsername: input.igUsername, via: input.action });
+      if (!takesDiscordEntries(rules) && g.maxParticipants && (await participantCount(g.id, rules)) >= g.maxParticipants) await closeGiveaway(g.id, 'system', 'cap');
     }
   }
-  return 'awarded';
+  return 'recorded';
 }
 
-export async function addManualBonus(giveawayId: number, entrantId: number, label: string, actorId: string) {
+/**
+ * After a complete read from Instagram: marks recorded actions that are no longer there
+ * (deleted or hidden) as removed. `scope` limits it to one post's comments, for example.
+ */
+export async function markMissingRemoved(giveawayId: number, action: 'comment' | 'tag', stillThere: Set<string>, reason: string, scope?: (a: Activity) => boolean) {
+  const recorded = await db
+    .select()
+    .from(activities)
+    .where(and(eq(activities.giveawayId, giveawayId), eq(activities.platform, 'instagram'), eq(activities.action, action), isNull(activities.removedAt)));
+  const gone = recorded.filter(a => (!scope || scope(a)) && !stillThere.has(a.sourceRef));
+  if (gone.length) {
+    await db
+      .update(activities)
+      .set({ removedAt: new Date(), removedReason: reason })
+      .where(inArray(activities.id, gone.map(a => a.id)));
+    await audit(giveawayId, 'system:instagram', 'activity.removed', { action, count: gone.length, reason });
+  }
+  return gone.length;
+}
+
+// ---------------------------------------------------------------------------
+// Overrides (admin decisions about one person)
+
+export async function addOverride(
+  giveawayId: number,
+  entrantId: number,
+  input: { kind: 'requirement_met'; ruleId: number; reason?: string } | { kind: 'manual_entry'; label: string; weight: number; reason?: string },
+  actorId: string,
+) {
   const entrant = await db.query.entrants.findFirst({ where: and(eq(entrants.id, entrantId), eq(entrants.giveawayId, giveawayId)) });
   if (!entrant) return null;
-  const [bonus] = await db
-    .insert(bonuses)
-    .values({ giveawayId, action: 'manual', entrantId, igUsername: entrant.igUsername, label, source: 'admin', createdBy: actorId })
+  const [row] = await db
+    .insert(overrides)
+    .values({
+      giveawayId,
+      entrantId,
+      kind: input.kind,
+      ruleId: input.kind === 'requirement_met' ? input.ruleId : null,
+      label: input.kind === 'manual_entry' ? input.label : null,
+      weight: input.kind === 'manual_entry' ? input.weight : 1,
+      reason: input.reason ?? null,
+      createdBy: actorId,
+    })
     .returning();
-  await audit(giveawayId, actorId, 'bonus.manual_added', { entrantId, label });
-  return bonus;
+  await audit(giveawayId, actorId, `override.${input.kind}`, { entrantId, ...input });
+  return row!;
 }
 
-/** Entries currently counted for one action (e.g. comments), with the Instagram ID they came from. */
-export async function countedBonuses(giveawayId: number, action: RuleAction) {
-  return db
-    .select({ id: bonuses.id, sourceRef: bonuses.sourceRef })
-    .from(bonuses)
-    .where(and(eq(bonuses.giveawayId, giveawayId), eq(bonuses.action, action), isNull(bonuses.revokedAt)));
-}
-
-export async function revokeBonus(giveawayId: number, bonusId: number, actorId: string, reason: string) {
+export async function revokeOverride(giveawayId: number, overrideId: number, actorId: string) {
   const rows = await db
-    .update(bonuses)
-    .set({ revokedAt: new Date(), revokedBy: actorId, revokedReason: reason })
-    .where(and(eq(bonuses.giveawayId, giveawayId), eq(bonuses.id, bonusId), isNull(bonuses.revokedAt)))
+    .update(overrides)
+    .set({ revokedAt: new Date(), revokedBy: actorId })
+    .where(and(eq(overrides.giveawayId, giveawayId), eq(overrides.id, overrideId), isNull(overrides.revokedAt)))
     .returning();
-  if (rows.length) await audit(giveawayId, actorId, 'bonus.revoked', { bonusId, reason });
+  if (rows.length) await audit(giveawayId, actorId, 'override.revoked', { overrideId });
   return rows[0];
 }
 
 // ---------------------------------------------------------------------------
-// Reporting
+// Calculating people (eligibility and entries)
 
-export type EntrantReport = Entrant & {
-  bonuses: Bonus[];
-  /** Base entry (1, Discord entrants only) plus active bonuses; 0 if disqualified. */
-  totalEntries: number;
+export type PersonReport = Entrant & {
+  accounts: { instagram: string | null };
+  result: EngineResult;
+  activities: Activity[];
+  overrides: Override[];
+  /** In the Discord server: true/false, or null if unknown (no Discord account, or bot offline). */
+  inServer: boolean | null;
 };
 
-/** Everyone in a giveaway with their active bonus entries, plus IG bonuses not matched to anyone yet. */
-export async function entrantReport(giveawayId: number) {
-  const people = await db.select().from(entrants).where(eq(entrants.giveawayId, giveawayId)).orderBy(asc(entrants.createdAt));
-  const active = await db
-    .select()
-    .from(bonuses)
-    .where(and(eq(bonuses.giveawayId, giveawayId), isNull(bonuses.revokedAt)))
-    .orderBy(asc(bonuses.createdAt));
+/**
+ * Everyone with activity in a giveaway, with eligibility and entries calculated from the
+ * activity log, the rules and overrides. Nothing here is stored, so it always reflects the
+ * current rules. `rulesOverride` lets a caller preview a rule change (dry run).
+ */
+export async function computePeople(g: Giveaway, client?: Client, rulesOverride?: EngineRule[]): Promise<PersonReport[]> {
+  const rules = rulesOverride ?? (await getRules(g.id));
+  const people = await db.select().from(entrants).where(eq(entrants.giveawayId, g.id)).orderBy(asc(entrants.createdAt));
+  const acts = await db.select().from(activities).where(and(eq(activities.giveawayId, g.id), isNull(activities.removedAt)));
+  const allActs = await db.select().from(activities).where(eq(activities.giveawayId, g.id));
+  const ovs = await db.select().from(overrides).where(and(eq(overrides.giveawayId, g.id), isNull(overrides.revokedAt)));
+  const members = await serverMemberIds(client).catch(() => null);
+  const window = { start: g.startsAt ?? g.createdAt, end: g.closedAt ?? g.endsAt, baseWeight: g.baseWeight, firstPostAt: firstPostAt(g) };
 
-  const byEntrant = new Map<number, Bonus[]>();
-  const byIg = new Map(people.filter(p => p.igUsername).map(p => [p.igUsername!, p.id]));
-  const unmatched: Bonus[] = [];
-  for (const b of active) {
-    const owner = b.entrantId ?? (b.igUsername ? byIg.get(b.igUsername) : undefined);
-    if (owner === undefined) unmatched.push(b);
-    else byEntrant.set(owner, [...(byEntrant.get(owner) ?? []), b]);
-  }
-
-  const report: EntrantReport[] = people.map(p => {
-    const list = byEntrant.get(p.id) ?? [];
-    // A Discord entry is worth 1 base entry; Instagram-only entrants count their actions.
-    return { ...p, bonuses: list, totalEntries: p.revokedAt ? 0 : (p.discordId ? 1 : 0) + list.length };
+  return people.map(p => {
+    const mine = (a: Activity) => (p.discordId && a.discordId === p.discordId) || (p.igUsername && a.igUsername === p.igUsername);
+    const myActs = acts.filter(mine);
+    const myOverrides = ovs.filter(o => o.entrantId === p.id);
+    const inServer = p.discordId && members ? members.has(p.discordId) : null;
+    const result = evaluatePerson({
+      giveaway: window,
+      rules,
+      person: { discordId: p.discordId, disqualified: !!p.revokedAt },
+      activities: myActs.map(a => ({ id: a.id, platform: a.platform, action: a.action, at: a.at, details: a.details as { taggedFriend?: boolean; caption?: string } })),
+      overrides: myOverrides.map<EngineOverride>(o =>
+        o.kind === 'requirement_met' ? { kind: 'requirement_met', ruleId: o.ruleId! } : { kind: 'manual_entry', weight: o.weight, label: o.label },
+      ),
+      isMember: inServer,
+    });
+    return { ...p, accounts: { instagram: p.igUsername }, result, activities: allActs.filter(mine), overrides: myOverrides, inServer };
   });
-  return { entrants: report, unmatched };
 }
 
 export async function auditRows(giveawayId: number, limit = 500) {

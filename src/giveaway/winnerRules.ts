@@ -5,7 +5,7 @@ export const DEFAULT_WINNER_MESSAGE =
   '🎉 Congrats {name}! You won **{giveaway}**!\nPress **Accept** by {deadline} to claim your prize.';
 
 /** Statuses that hold a winner slot. Declined and expired ones free it up for a redraw. */
-export const ACTIVE_WINNER_STATUSES: WinnerStatus[] = ['pending', 'notified', 'unreachable', 'accepted'];
+export const ACTIVE_WINNER_STATUSES: WinnerStatus[] = ['checking', 'pending', 'notified', 'unreachable', 'accepted'];
 
 export function openSlots(winnerCount: number, statuses: WinnerStatus[]) {
   return Math.max(0, winnerCount - statuses.filter(s => ACTIVE_WINNER_STATUSES.includes(s)).length);

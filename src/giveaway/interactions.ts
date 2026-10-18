@@ -10,7 +10,7 @@ import {
 } from 'discord.js';
 import type { FormField } from '../db/schema.js';
 import { channelName } from '../discord/channels.js';
-import { getEntrantByDiscord, getGiveaway, getOpenGiveaway, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
+import { discordChannel, getEntrantByDiscord, getGiveaway, getOpenGiveaway, isInstagramField, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 const MODAL_PREFIX = 'giveaway:enter:';
@@ -19,7 +19,7 @@ const CONTACT_ADMIN = "We couldn't save your entry. Message an admin and we'll s
 
 function currentValue(field: FormField, entrant: Entrant | undefined) {
   if (!entrant) return undefined;
-  return field.type === 'ig_username' ? (entrant.igUsername ?? undefined) : entrant.answers[field.id];
+  return isInstagramField(field) ? (entrant.igUsername ?? undefined) : entrant.answers[field.id];
 }
 
 /** One form field as a labeled Discord component, pre-filled with the person's last answer. */
@@ -42,7 +42,7 @@ function buildField(field: FormField, entrant: Entrant | undefined) {
     .setCustomId(field.id)
     .setStyle(field.type === 'long_text' ? TextInputStyle.Paragraph : TextInputStyle.Short)
     .setRequired(field.required)
-    .setMaxLength(field.type === 'ig_username' ? 60 : field.type === 'long_text' ? 1000 : 200);
+    .setMaxLength(isInstagramField(field) ? 60 : field.type === 'long_text' ? 1000 : 200);
   if (field.placeholder) input.setPlaceholder(field.placeholder);
   if (value) input.setValue(value);
   return label.setTextInputComponent(input);
@@ -57,7 +57,8 @@ export async function showEntryModal(interaction: ChatInputCommandInteraction) {
   }
 
   const channel = interaction.channel;
-  const wanted = g.entryChannel ? channelName(g.entryChannel) : null;
+  const entryChannel = discordChannel(g);
+  const wanted = entryChannel ? channelName(entryChannel) : null;
   if (wanted && (!channel || !('name' in channel) || channel.name !== wanted)) {
     const target = interaction.guild?.channels.cache.find(c => c.name === wanted);
     await interaction.reply({ content: `Head over to ${target ? `<#${target.id}>` : `#${wanted}`} to enter!`, flags: ephemeral });
@@ -124,7 +125,7 @@ function entryReply(g: Giveaway, result: EntryResult): string {
     case 'updated':
       return `✅ Entry updated!${reminder}`;
     case 'invalid':
-      return result.field.type === 'ig_username'
+      return isInstagramField(result.field)
         ? "❌ That doesn't look like an Instagram username. Use only letters, numbers, periods and underscores (up to 30 characters)."
         : `❌ Please check "${result.field.label}" and try again.`;
     case 'closed':

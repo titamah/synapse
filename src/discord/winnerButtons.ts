@@ -1,13 +1,13 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, MessageFlags, type ButtonInteraction } from 'discord.js';
 import { db } from '../db/client.js';
 import { isAdmin } from '../lib/permissions.js';
-import { WINNER_BUTTON, getWinner, notifyWinner, resolveWinner } from '../giveaway/winners.js';
+import { WINNER_BUTTON, confirmWinnerCheck, getWinner, notifyWinner, resolveWinner } from '../giveaway/winners.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 
 /** All winner buttons: admin ones in #community-updates, and Accept/Decline in the winner's DM. */
 export async function handleWinnerButton(interaction: ButtonInteraction) {
-  const [, action, idText] = interaction.customId.match(WINNER_BUTTON)!;
+  const [, action, idText, ruleText] = interaction.customId.match(WINNER_BUTTON)!;
   const winnerId = Number(idText);
   const w = await getWinner(winnerId);
   if (!w) {
@@ -17,6 +17,20 @@ export async function handleWinnerButton(interaction: ButtonInteraction) {
   const by = `discord:${interaction.user.username}`;
 
   // ----- Admin buttons (#community-updates)
+  if (action === 'check-yes' || action === 'check-no') {
+    if (!isAdmin(interaction)) {
+      await interaction.reply({ content: '🔒 Admins only.', flags: ephemeral });
+      return;
+    }
+    await interaction.deferReply({ flags: ephemeral });
+    const result = await confirmWinnerCheck(interaction.client, winnerId, Number(ruleText), action === 'check-yes', by);
+    // Remove this check's buttons; others stay until confirmed.
+    const remaining = interaction.message.components.filter(row => !JSON.stringify(row.toJSON()).includes(`:${winnerId}:${ruleText}"`));
+    await interaction.message.edit({ components: action === 'check-no' ? [] : remaining }).catch(() => undefined);
+    await interaction.editReply(result.ok ? (action === 'check-yes' ? '✅ Confirmed.' : '❌ Marked as not met. The winner is disqualified.') : `ℹ️ ${result.error}`);
+    return;
+  }
+
   if (action === 'notify' || action === 'mark-accepted' || action === 'mark-declined') {
     if (!isAdmin(interaction)) {
       await interaction.reply({ content: '🔒 Admins only.', flags: ephemeral });

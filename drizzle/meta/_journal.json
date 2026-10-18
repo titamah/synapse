@@ -92,6 +92,13 @@
       "when": 1792364518280,
       "tag": "0012_engine_v2_data",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792364810753,
+      "tag": "0013_drop_v1_columns",
+      "breakpoints": true
     }
   ]
 }

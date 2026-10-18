@@ -108,9 +108,9 @@ export async function resolvePost(input: string): Promise<IgPost | null> {
 
 export type GiveawayPost = { id: string; postedAt: Date };
 
-/** The giveaway's Instagram post, set from the dashboard (igPost). */
-export function knownGiveawayPost(g: Giveaway): GiveawayPost | null {
-  return g.igMediaId && g.igPostedAt ? { id: g.igMediaId, postedAt: g.igPostedAt } : null;
+/** The giveaway's Instagram posts (set in the dashboard). Comments on any of them count. */
+export function giveawayPosts(g: Giveaway): GiveawayPost[] {
+  return (g.platformSettings.instagram?.posts ?? []).map(p => ({ id: p.id, postedAt: new Date(p.postedAt) }));
 }
 
 // ---------------------------------------------------------------------------

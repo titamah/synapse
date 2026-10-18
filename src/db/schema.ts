@@ -1,15 +1,10 @@
-import { sql } from 'drizzle-orm';
-import { boolean, pgEnum, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { boolean, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
 /** Platforms a giveaway can run on. New platforms get added here. */
 export const PLATFORMS = ['discord', 'instagram'] as const;
 export type Platform = (typeof PLATFORMS)[number];
 /** Platforms people have a username on (everything except Discord, which is the entry form itself). */
 export type AccountPlatform = Exclude<Platform, 'discord'>;
-
-/** @deprecated v1; replaced by platforms + rules. Kept until the migration drops it. */
-export const ENTRY_METHODS = ['discord', 'instagram'] as const;
-export type EntryMethod = (typeof ENTRY_METHODS)[number];
 
 /** One entry-form field. Discord forms allow up to 5. */
 export type FormField = {
@@ -68,9 +63,6 @@ export const giveaways = pgTable('giveaways', {
   baseWeight: integer('base_weight').notNull().default(1),
   // Discord channel, Instagram posts, etc. (see PlatformSettings).
   platformSettings: jsonb('platform_settings').$type<PlatformSettings>().notNull().default({}),
-  // @deprecated v1 (entry_methods, entry_channel, ig_*): replaced by rules + platform_settings.
-  entryMethods: text('entry_methods').array().$type<EntryMethod[]>().notNull().default(sql`ARRAY['discord']::text[]`),
-  entryChannel: text('entry_channel'),
   formFields: jsonb('form_fields').$type<FormField[]>().notNull().default([]),
   reminderText: text('reminder_text'),
   maxParticipants: integer('max_participants'),
@@ -84,10 +76,6 @@ export const giveaways = pgTable('giveaways', {
   notifyDelayMinutes: integer('notify_delay_minutes').notNull().default(30),
   winnerMessage: text('winner_message'),
   claimHours: integer('claim_hours').notNull().default(12),
-  // The giveaway's Instagram post, set from a link in the dashboard.
-  igMediaId: text('ig_media_id'),
-  igPostedAt: timestamp('ig_posted_at', { withTimezone: true }),
-  igPermalink: text('ig_permalink'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -101,8 +89,7 @@ export type DiscordAction = (typeof ACTIONS)['discord'][number];
 export type InstagramAction = (typeof ACTIONS)['instagram'][number];
 export type RuleAction = DiscordAction | InstagramAction;
 export const MANUAL_ACTIONS: readonly RuleAction[] = ['follow'];
-/** @deprecated v1 action names, converted by the migration. */
-export type LegacyRuleAction = 'ig_comment' | 'ig_story' | 'ig_tag';
+
 export type RuleOptions = {
   /** ig_comment: must @mention someone other than us or the commenter. */
   requireTag?: boolean | undefined;
@@ -160,38 +147,6 @@ export const entrants = pgTable(
   t => [
     uniqueIndex('entrants_giveaway_discord_uq').on(t.giveawayId, t.discordId),
     uniqueIndex('entrants_giveaway_ig_uq').on(t.giveawayId, t.igUsername),
-  ],
-);
-
-export const bonusSource = pgEnum('bonus_source', ['admin', 'ig_api', 'ig_webhook', 'posh']);
-
-/**
- * Extra entries earned beyond the base entry. Instagram ones are keyed by IG username,
- * not entrant, so one that arrives before someone enters ("unmatched") attaches
- * automatically once they do. Manual ones are given to an entrant directly.
- */
-export const bonuses = pgTable(
-  'bonuses',
-  {
-    id: serial('id').primaryKey(),
-    giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id),
-    action: text('action').$type<RuleAction | 'manual'>(),
-    ruleId: integer('rule_id').references(() => giveawayRules.id, { onDelete: 'set null' }),
-    entrantId: integer('entrant_id').references(() => entrants.id),
-    label: text('label'),
-    igUsername: text('ig_username'),
-    source: bonusSource('source').notNull(),
-    sourceRef: text('source_ref'),
-    createdBy: text('created_by'),
-    revokedAt: timestamp('revoked_at', { withTimezone: true }),
-    revokedBy: text('revoked_by'),
-    revokedReason: text('revoked_reason'),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  t => [
-    // The same comment or Story mention can only ever count once.
-    uniqueIndex('bonuses_giveaway_action_ref_uq').on(t.giveawayId, t.action, t.sourceRef),
-    index('bonuses_giveaway_ig_idx').on(t.giveawayId, t.igUsername),
   ],
 );
 
