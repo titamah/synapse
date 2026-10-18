@@ -5,40 +5,45 @@ import { z } from 'zod';
 import { eq, inArray } from 'drizzle-orm';
 import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
-import { ENTRY_METHODS, giveawayRules, giveaways, type EntryMethod } from '../db/schema.js';
+import { ACTIONS, giveawayRules, giveaways, type FormField, type Platform, type PlatformSettings } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
-import { serverMemberIds } from '../discord/members.js';
 import { channelName } from '../discord/channels.js';
-import { listRecentPosts, resolvePost } from '../instagram/api.js';
+import { listRecentPosts, resolvePost, type IgPost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
 import { hasTagRules } from '../instagram/tags.js';
 import { renewTokenIfDue, tokenStatus } from '../instagram/token.js';
 import { announceExtended } from '../giveaway/announcements.js';
-import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
-import { drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
 import { resolveAnnouncements } from '../giveaway/announcementRules.js';
-import type { Rule } from '../giveaway/rules.js';
+import type { EngineRule } from '../giveaway/engine.js';
+import { describeRule, ruleLabel } from '../giveaway/labels.js';
+import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
+import { confirmWinnerCheck, drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
 import {
-  addManualBonus,
+  addOverride,
   audit,
   auditRows,
   closeGiveaway,
+  computePeople,
   deleteGiveaway,
-  entrantCount,
-  entrantReport,
+  discordChannel,
   findOverlap,
+  firstPostAt,
   getGiveaway,
   getRules,
+  isInstagramField,
   listGiveaways,
-  revokeBonus,
+  participantCount,
+  revokeOverride,
   setEntrantRevoked,
   slugify,
   statusOf,
+  takesDiscordEntries,
   type Giveaway,
+  type PersonReport,
 } from '../giveaway/service.js';
 
 // ---------------------------------------------------------------------------
-// Validation
+// Validation (v2, plus the v1 fields the current dashboard still sends)
 
 const isoDate = z.iso.datetime({ offset: true }).transform(s => new Date(s));
 
@@ -52,42 +57,75 @@ const formFieldSchema = z
   .object({
     id: z.string().regex(/^[a-z0-9_]{1,40}$/, 'lowercase letters, numbers and underscores'),
     label: z.string().min(1).max(45),
-    type: z.enum(['ig_username', 'short_text', 'long_text', 'select']),
+    // ig_username = v1 name for an Instagram account field
+    type: z.enum(['account', 'short_text', 'long_text', 'select', 'ig_username']),
     required: unset(z.boolean()).transform(v => v ?? false),
     placeholder: unset(z.string().max(100)),
     options: unset(z.array(z.string().min(1).max(100)).max(25)).transform(v => (v?.length ? v : undefined)),
+    platforms: unset(z.array(z.enum(['instagram'])).min(1)),
+    locked: unset(z.boolean()),
   })
-  .refine(f => f.type !== 'select' || !!f.options?.length, { message: 'select fields need options' });
+  .transform(f => (f.type === 'ig_username' ? { ...f, type: 'account' as const, platforms: ['instagram' as const] } : f))
+  .refine(f => f.type !== 'select' || !!f.options?.length, { message: 'select fields need options' })
+  .refine(f => f.type !== 'account' || !!f.platforms?.length, { message: 'account fields need platforms' });
+
+const ALL_ACTIONS = [...ACTIONS.discord, ...ACTIONS.instagram] as const;
+const ruleOptions = unset(z.object({ requireTag: unset(z.boolean()), captionIncludes: unset(z.string().min(1).max(100)) }));
 
 const ruleSchema = z.object({
   id: unset(z.number().int()),
-  action: z.enum(['ig_comment', 'ig_story', 'ig_tag']),
-  maxCount: z.number().int().min(1).max(1000),
-  // null = no window / no frequency
+  action: z.enum(ALL_ACTIONS),
+  type: unset(z.enum(['required', 'bonus'])).transform(v => v ?? 'bonus'),
+  weight: unset(z.number().int().min(1).max(1000)).transform(v => v ?? 1),
+  min: unset(z.number().int().min(1).max(1000)).transform(v => v ?? 1),
+  check: z.enum(['winners', 'everyone']).nullish(),
+  maxCount: unset(z.number().int().min(1).max(1000)).transform(v => v ?? 1),
   windowStart: isoDate.nullish(),
   windowEnd: isoDate.nullish(),
   frequency: z.enum(['day', 'week']).nullish(),
-  options: unset(z.object({ requireTag: unset(z.boolean()), captionIncludes: unset(z.string().min(1).max(100)) })),
+  options: ruleOptions,
+});
+type RuleInput = z.infer<typeof ruleSchema>;
+
+const platformSchema = z.discriminatedUnion('platform', [
+  z.object({
+    platform: z.literal('discord'),
+    // Channel NAME; a leading # and capitals are fine ("#GTA-Giveaway" is saved as "gta-giveaway").
+    settings: unset(z.object({ channel: z.string().max(100).nullish().transform(v => (typeof v === 'string' ? channelName(v) || null : v)) })),
+    rules: z.array(ruleSchema).min(1, 'each platform needs at least one rule'),
+  }),
+  z.object({
+    platform: z.literal('instagram'),
+    settings: unset(z.object({
+      // Post links (instagram.com/p/…) or media IDs; also accepts the post objects this API returns.
+      posts: unset(z.array(z.union([z.string().min(1).max(500), z.object({ id: z.string() }).passthrough().transform(p => p.id)])).max(20)),
+      autoIncludeHashtag: z.string().regex(/^#\w{1,60}$/, 'a single hashtag like #BBxGTAVI').nullish(),
+    })),
+    rules: z.array(ruleSchema).min(1, 'each platform needs at least one rule'),
+  }),
+]);
+type PlatformInput = z.infer<typeof platformSchema>;
+
+/** v1 rules (flat, Instagram only, ig_* names). */
+const v1RuleSchema = z.object({
+  id: unset(z.number().int()),
+  action: z.enum(['ig_comment', 'ig_story', 'ig_tag']),
+  maxCount: z.number().int().min(1).max(1000),
+  windowStart: isoDate.nullish(),
+  windowEnd: isoDate.nullish(),
+  frequency: z.enum(['day', 'week']).nullish(),
+  options: ruleOptions,
 });
 
 const giveawayFields = {
   name: z.string().min(1).max(80),
   startsAt: isoDate,
   endsAt: isoDate,
-  // One or more: discord = /giveaway enter; instagram = your first counted Instagram action enters you.
-  entryMethods: unset(z.array(z.enum(ENTRY_METHODS)).min(1, 'pick at least one way to enter').max(ENTRY_METHODS.length)).transform(v => (v ? [...new Set(v)] : v)),
-  // null = clear the setting
-  // Channel NAME; a leading # and capitals are fine ("#GTA-Giveaway" is saved as "gta-giveaway").
-  entryChannel: z.string().max(100).nullish().transform(v => (typeof v === 'string' ? channelName(v) || null : v)),
-  // The giveaway's Instagram post: a link (instagram.com/p/…) or media ID. Can be set any time,
-  // even after the giveaway starts; comments are counted from startsAt. null = clear.
-  igPost: z.string().min(1).max(500).nullish(),
+  baseWeight: unset(z.number().int().min(1).max(1000)),
+  platforms: unset(z.array(platformSchema).min(1, 'pick at least one platform').max(2)),
   reminderText: z.string().max(500).nullish(),
   maxParticipants: z.number().int().min(1).nullish(),
-  // null = not set
   formFields: unset(z.array(formFieldSchema).max(5)),
-  rules: unset(z.array(ruleSchema).max(20)),
-  // Discord updates in #community-updates. Anything left out uses the defaults.
   announcements: unset(
     z.object({
       enabled: unset(z.boolean()),
@@ -100,7 +138,6 @@ const giveawayFields = {
     }),
   ),
   testMode: unset(z.boolean()),
-  // Winners
   winnerCount: unset(z.number().int().min(1).max(100)),
   winnerSelect: unset(z.enum(['manual', 'auto'])),
   winnerNotify: unset(z.enum(['manual', 'auto'])),
@@ -108,78 +145,209 @@ const giveawayFields = {
   // DM text with {name}, {giveaway}, {deadline}. null = use the default message.
   winnerMessage: z.string().max(1500).nullish(),
   claimHours: unset(z.number().int().min(1).max(720)),
+  // ----- v1 (deprecated, translated into platforms): kept so the current dashboard keeps working.
+  entryMethods: unset(z.array(z.enum(['discord', 'instagram'])).min(1).max(2)),
+  entryChannel: z.string().max(100).nullish().transform(v => (typeof v === 'string' ? channelName(v) || null : v)),
+  igPost: z.string().min(1).max(500).nullish(),
+  rules: unset(z.array(v1RuleSchema).max(20)),
 };
 
 const createSchema = z.object(giveawayFields);
 const updateSchema = z.object(giveawayFields).partial();
 type GiveawayInput = z.infer<typeof updateSchema>;
 
-/** Checks that need the whole picture: dates, IG setup, unique field ids. Returns an error message or null. */
-function crossCheck(merged: {
-  entryMethods?: EntryMethod[] | undefined;
-  startsAt: Date | null;
-  endsAt: Date;
-  formFields: { id: string; type: string }[];
-  rules: { action: string; windowStart?: Date | null | undefined; windowEnd?: Date | null | undefined }[];
-}) {
-  if (!merged.startsAt || merged.endsAt <= merged.startsAt) return 'endsAt must be after startsAt';
-  const ids = merged.formFields.map(f => f.id);
-  if (new Set(ids).size !== ids.length) return 'form field ids must be unique';
-  if (merged.formFields.filter(f => f.type === 'ig_username').length > 1) return 'only one Instagram username field allowed';
-  const igRules = merged.rules.some(r => r.action.startsWith('ig_'));
-  const methods = merged.entryMethods ?? ['discord'];
-  if (methods.includes('instagram') && !igRules) return 'Instagram entry needs at least one Instagram rule (that\'s how people enter)';
-  // Discord entrants are matched to their Instagram activity by the username they give in the form.
-  if (igRules && methods.includes('discord') && !merged.formFields.some(f => f.type === 'ig_username')) {
-    return 'Instagram rules need an Instagram username field in the form';
+// ---------------------------------------------------------------------------
+// v1 → v2 translation
+
+const V1_ACTION = { ig_comment: 'comment', ig_story: 'story', ig_tag: 'tag' } as const;
+const toV1Action = (a: string) => (({ comment: 'ig_comment', story: 'ig_story', tag: 'ig_tag' }) as Record<string, string>)[a] ?? a;
+
+/** Current platforms of a saved giveaway, in input shape (for merging partial v1 edits). */
+function currentPlatforms(g: Giveaway, rules: EngineRule[]): PlatformInput[] {
+  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes } });
+  const out: PlatformInput[] = [];
+  const discord = rules.filter(r => r.platform === 'discord');
+  if (discord.length) out.push({ platform: 'discord', settings: { channel: discordChannel(g) }, rules: discord.map(toInput) });
+  const ig = rules.filter(r => r.platform === 'instagram');
+  if (ig.length || g.platformSettings.instagram) {
+    out.push({
+      platform: 'instagram',
+      settings: { posts: (g.platformSettings.instagram?.posts ?? []).map(p => p.id), autoIncludeHashtag: g.platformSettings.instagram?.autoIncludeHashtag ?? null },
+      rules: ig.map(toInput),
+    });
   }
-  for (const r of merged.rules) {
-    if (r.windowStart && r.windowEnd && r.windowEnd <= r.windowStart) return 'rule windowEnd must be after windowStart';
+  return out;
+}
+
+/**
+ * Builds v2 platforms from v1 fields (entryMethods, entryChannel, igPost, flat rules), applied on
+ * top of the giveaway's current platforms when editing. Returns undefined if no v1 field was sent.
+ */
+function platformsFromV1(input: GiveawayInput, current: PlatformInput[] | null): PlatformInput[] | undefined {
+  const touched = input.entryMethods !== undefined || input.entryChannel !== undefined || input.igPost !== undefined || input.rules !== undefined;
+  if (!touched) return undefined;
+
+  const prevDiscord = current?.find(p => p.platform === 'discord') as Extract<PlatformInput, { platform: 'discord' }> | undefined;
+  const prevIg = current?.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
+  const methods = input.entryMethods ?? (current ? [...(prevDiscord ? ['discord' as const] : []), ...(prevIg && !prevDiscord ? ['instagram' as const] : [])] : ['discord' as const]);
+  const either = methods.includes('discord') && methods.includes('instagram');
+
+  const igRules: RuleInput[] = input.rules
+    ? input.rules.map(r => ({ id: r.id, action: V1_ACTION[r.action], type: 'bonus', weight: 1, min: 1, check: null, maxCount: r.maxCount, windowStart: r.windowStart, windowEnd: r.windowEnd, frequency: r.frequency, options: r.options }))
+    : (prevIg?.rules ?? []);
+  if (!methods.includes('discord') && igRules.length && !igRules.some(r => r.type === 'required')) igRules[0] = { ...igRules[0]!, type: 'required' };
+
+  const out: PlatformInput[] = [];
+  if (methods.includes('discord')) {
+    const discordRules: RuleInput[] =
+      input.entryMethods || !prevDiscord
+        ? [
+            { id: undefined, action: 'enter', type: either ? 'bonus' : 'required', weight: 1, min: 1, check: null, maxCount: 1, options: undefined },
+            ...(either ? [] : [{ id: undefined, action: 'member' as const, type: 'required' as const, weight: 1, min: 1, check: null, maxCount: 1, options: undefined }]),
+          ]
+        : prevDiscord.rules;
+    out.push({ platform: 'discord', settings: { channel: input.entryChannel !== undefined ? input.entryChannel : (prevDiscord?.settings?.channel ?? null) }, rules: discordRules });
   }
-  return null;
+  const posts = input.igPost !== undefined ? (input.igPost ? [input.igPost] : []) : (prevIg?.settings?.posts ?? []);
+  if (igRules.length || posts.length) {
+    out.push({ platform: 'instagram', settings: { posts, autoIncludeHashtag: prevIg?.settings?.autoIncludeHashtag ?? null }, rules: igRules });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
-// Shapes returned to the dashboard
+// Checks that need the whole picture
 
-const ACTION_LABELS: Record<string, string> = {
-  ig_comment: 'Instagram comment',
-  ig_story: 'Instagram Story mention',
-  ig_tag: 'Instagram post tagging us',
-  manual: 'Manual',
-};
+type Checked = { error: string } | { formFields: FormField[] };
 
-const fmt = (d: Date) =>
-  d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+/**
+ * Validates platforms, rules and dates, and returns the form with Synapse's required account
+ * fields added and locked: when Discord "enter" is required and another platform is present,
+ * the Discord form must collect that platform's username (it's how one person is linked).
+ */
+function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: PlatformInput[]; formFields: FormField[] }): Checked {
+  if (!merged.startsAt || merged.endsAt <= merged.startsAt) return { error: 'endsAt must be after startsAt' };
+  const seen = new Set<string>();
+  for (const p of merged.platforms) {
+    if (seen.has(p.platform)) return { error: `${p.platform} is listed twice` };
+    seen.add(p.platform);
+    for (const r of p.rules) {
+      if (!(ACTIONS[p.platform] as readonly string[]).includes(r.action)) return { error: `"${r.action}" isn't a ${p.platform} action (use ${ACTIONS[p.platform].join(', ')})` };
+      if (r.windowStart && r.windowEnd && r.windowEnd <= r.windowStart) return { error: 'rule windowEnd must be after windowStart' };
+      if (r.check && r.action !== 'follow') return { error: '"check" only applies to manual actions (follow)' };
+    }
+  }
+  const discord = merged.platforms.find(p => p.platform === 'discord');
+  const entersOnDiscord = !!discord?.rules.some(r => r.action === 'enter');
+  if (entersOnDiscord && !(discord as Extract<PlatformInput, { platform: 'discord' }>).settings?.channel) {
+    return { error: 'Discord "enter" needs a channel (settings.channel)' };
+  }
 
-/** Human label for a rule, used in the dashboard and as export column headers. */
-export function describeRule(r: Rule) {
-  const parts = [`${ACTION_LABELS[r.action] ?? r.action} (max ${r.maxCount}`];
-  if (r.frequency) parts.push(`, 1 per ${r.frequency}`);
-  if (r.windowStart || r.windowEnd) parts.push(`, ${r.windowStart ? fmt(r.windowStart) : 'start'}–${r.windowEnd ? fmt(r.windowEnd) : 'end'}`);
-  if (r.options.requireTag) parts.push(', must tag a friend');
-  if (r.options.captionIncludes) parts.push(`, caption includes "${r.options.captionIncludes}"`);
-  return `#${r.position} ${parts.join('')})`;
+  let formFields = [...merged.formFields];
+  const ids = formFields.map(f => f.id);
+  if (new Set(ids).size !== ids.length) return { error: 'form field ids must be unique' };
+  // Link people across platforms: Discord entry + Instagram needs the Instagram username in the form.
+  const needsIg = entersOnDiscord && merged.platforms.some(p => p.platform === 'instagram');
+  if (needsIg) {
+    const existing = formFields.find(isInstagramField);
+    if (existing) formFields = formFields.map(f => (f === existing ? { ...f, type: 'account', platforms: ['instagram'], required: true, locked: true } : f));
+    else formFields = [{ id: 'ig', type: 'account', platforms: ['instagram'], label: 'Instagram username', required: true, locked: true }, ...formFields];
+  }
+  if (formFields.filter(isInstagramField).length > 1) return { error: 'only one Instagram username field allowed' };
+  if (formFields.length > 5) return { error: 'Discord forms allow at most 5 fields (including the locked account field)' };
+  return { formFields };
 }
 
-async function giveawayJson(g: Giveaway) {
+// ---------------------------------------------------------------------------
+// Shapes returned to the dashboard (v2, plus v1 mirrors)
+
+function platformsJson(g: Giveaway, rules: EngineRule[], sync: unknown) {
+  return currentPlatforms(g, rules).map(p =>
+    p.platform === 'instagram'
+      ? { platform: p.platform, settings: { posts: g.platformSettings.instagram?.posts ?? [], autoIncludeHashtag: g.platformSettings.instagram?.autoIncludeHashtag ?? null, sync }, rules: rulesJson(rules, 'instagram') }
+      : { platform: p.platform, settings: { channel: discordChannel(g) }, rules: rulesJson(rules, 'discord') },
+  );
+}
+
+const rulesJson = (rules: EngineRule[], platform: Platform) =>
+  rules.filter(r => r.platform === platform).map(r => ({ ...r, label: ruleLabel(r), description: describeRule(r) }));
+
+async function giveawayJson(g: Giveaway, client?: Client) {
   const rules = await getRules(g.id);
+  const people = await computePeople(g, client);
+  const eligible = people.filter(p => p.result.eligible);
+  const sync = await getSyncStatus(g.id);
+  const firstPost = g.platformSettings.instagram?.posts?.[0];
   return {
-    ...g,
+    id: g.id,
+    name: g.name,
+    slug: g.slug,
     status: statusOf(g),
-    entrantCount: await entrantCount(g.id),
-    rules: rules.map(r => ({ ...r, description: describeRule(r) })),
-    // Effective update settings with defaults filled in, for the dashboard's toggles.
+    startsAt: g.startsAt,
+    endsAt: g.endsAt,
+    baseWeight: g.baseWeight,
+    platforms: platformsJson(g, rules, sync),
+    formFields: g.formFields,
+    reminderText: g.reminderText,
+    maxParticipants: g.maxParticipants,
+    testMode: g.testMode,
     announcements: resolveAnnouncements(g.announcements),
+    winnerCount: g.winnerCount,
+    winnerSelect: g.winnerSelect,
+    winnerNotify: g.winnerNotify,
+    notifyDelayMinutes: g.notifyDelayMinutes,
+    winnerMessage: g.winnerMessage,
     defaultWinnerMessage: DEFAULT_WINNER_MESSAGE,
+    claimHours: g.claimHours,
     winners: await listWinners(g.id),
-    // Last Instagram comment read: show a warning when lastError is set.
-    igSync: await getSyncStatus(g.id),
+    closedAt: g.closedAt,
+    closeReason: g.closeReason,
+    entrantCount: await participantCount(g.id, rules),
+    peopleCount: people.filter(p => !p.revokedAt).length,
+    eligibleCount: eligible.length,
+    entryCount: eligible.reduce((s, p) => s + p.result.entries.total, 0),
+    igSync: sync,
+    createdAt: g.createdAt,
+    updatedAt: g.updatedAt,
+    // ----- v1 mirrors (deprecated): for dashboards not yet on v2.
+    entryMethods: [...(takesDiscordEntries(rules) ? ['discord'] : []), ...(rules.some(r => r.platform === 'instagram' && r.type === 'required') && !takesDiscordEntries(rules) ? ['instagram'] : [])],
+    entryChannel: discordChannel(g),
+    igMediaId: firstPost?.id ?? null,
+    igPermalink: firstPost?.permalink ?? null,
+    igPostedAt: firstPostAt(g),
+    rules: rules
+      .filter(r => r.platform === 'instagram' && r.type === 'bonus' && r.action !== 'follow')
+      .map(r => ({ ...r, action: toV1Action(r.action), description: describeRule(r) })),
   };
 }
 
-/** Looks up the post for an igPost value. Returns the post, or an HTTP error to send back. */
-async function lookupIgPost(value: string) {
+/** One person, v2 shape (GET /people). */
+function personJson(p: PersonReport, rules: EngineRule[]) {
+  const label = (id: number) => {
+    const r = rules.find(x => x.id === id);
+    return r ? ruleLabel(r) : `rule #${id}`;
+  };
+  return {
+    id: p.id,
+    discord: p.discordId ? { id: p.discordId, username: p.discordUsername } : null,
+    accounts: p.accounts,
+    answers: p.answers,
+    eligible: p.result.eligible,
+    missing: p.result.missing.map(label),
+    winnerChecks: p.result.winnerChecks.map(label),
+    entries: p.result.entries,
+    breakdown: p.result.breakdown.map(b => ({ ...b, label: label(b.ruleId) })),
+    requirements: p.result.requirements.map(r => ({ ...r, label: label(r.ruleId) })),
+    overrides: p.overrides.map(o => ({ id: o.id, kind: o.kind, ruleId: o.ruleId, label: o.label, weight: o.weight, reason: o.reason, by: o.createdBy, at: o.createdAt })),
+    inServer: p.inServer,
+    disqualified: p.revokedAt ? { reason: p.revokedReason, by: p.revokedBy, at: p.revokedAt } : null,
+    activity: p.activities.map(a => ({ id: a.id, platform: a.platform, action: a.action, at: a.at, removed: a.removedAt ? a.removedReason ?? true : false })),
+    createdAt: p.createdAt,
+  };
+}
+
+/** Looks up the post for an Instagram link or ID. Returns the post, or an HTTP error to send back. */
+async function lookupIgPost(value: string): Promise<{ post: IgPost; error?: undefined } | { post?: undefined; error: { status: number; message: string } }> {
   try {
     const post = await resolvePost(value);
     if (!post) return { error: { status: 400, message: `Couldn't find that post on @BostonBlerds. Paste the post's link (instagram.com/p/…).` } };
@@ -188,6 +356,49 @@ async function lookupIgPost(value: string) {
     return { error: { status: 502, message: `Instagram didn't respond: ${(err as Error).message}` } };
   }
 }
+
+/** Resolves post links/IDs to stored posts (reusing ones already saved, so unchanged posts need no API call). */
+async function resolvePosts(values: string[], existing: NonNullable<PlatformSettings['instagram']>['posts']) {
+  const out: NonNullable<PlatformSettings['instagram']>['posts'] = [];
+  for (const v of values) {
+    const known = existing.find(p => p.id === v || p.permalink === v);
+    if (known) {
+      out.push(known);
+      continue;
+    }
+    const found = await lookupIgPost(v);
+    if (found.error) return { error: found.error };
+    if (!out.some(p => p.id === found.post.id)) out.push({ id: found.post.id, permalink: found.post.permalink, postedAt: found.post.postedAt });
+  }
+  return { posts: out };
+}
+
+function settingsFrom(platforms: PlatformInput[], posts: NonNullable<PlatformSettings['instagram']>['posts']): PlatformSettings {
+  const discord = platforms.find(p => p.platform === 'discord') as Extract<PlatformInput, { platform: 'discord' }> | undefined;
+  const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
+  return {
+    ...(discord ? { discord: { channel: discord.settings?.channel ?? null } } : {}),
+    ...(ig ? { instagram: { posts, autoIncludeHashtag: ig.settings?.autoIncludeHashtag ?? null } } : {}),
+  };
+}
+
+const ruleRows = (platforms: PlatformInput[]) =>
+  platforms.flatMap(p =>
+    p.rules.map(r => ({
+      id: r.id,
+      platform: p.platform,
+      action: r.action,
+      type: r.type,
+      weight: r.weight,
+      min: r.min,
+      check: r.action === 'follow' ? (r.check ?? 'winners') : null,
+      maxCount: r.type === 'required' ? 1 : r.maxCount,
+      windowStart: r.windowStart ?? null,
+      windowEnd: r.windowEnd ?? null,
+      frequency: r.type === 'required' ? null : (r.frequency ?? null),
+      options: r.options ?? {},
+    })),
+  );
 
 /** Runs in the background so the dashboard gets its response right away. */
 const inBackground = (task: Promise<unknown>) => void task.catch(err => console.error('Background task failed:', err));
@@ -233,25 +444,24 @@ export function createAdminRouter(client?: Client) {
 
   router.get('/giveaways', async (_req, res) => {
     const all = await listGiveaways();
-    res.json(await Promise.all(all.map(giveawayJson)));
+    res.json(await Promise.all(all.map(g => giveawayJson(g, client))));
   });
 
   router.post('/giveaways', requireActor, async (req: Req, res) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return void res.status(400).json({ error: z.prettifyError(parsed.error) });
-    const input = { ...parsed.data, formFields: parsed.data.formFields ?? [], rules: parsed.data.rules ?? [] };
-    const problem = crossCheck(input);
-    if (problem) return void res.status(400).json({ error: problem });
+    const input = parsed.data;
+    const platforms = input.platforms ?? platformsFromV1(input, null) ?? [];
+    if (!platforms.length) return void res.status(400).json({ error: 'pick at least one platform (platforms)' });
+    const checked = crossCheck({ startsAt: input.startsAt, endsAt: input.endsAt, platforms, formFields: input.formFields ?? [] });
+    if ('error' in checked) return void res.status(400).json({ error: checked.error });
 
     const overlap = await findOverlap(input.startsAt, input.endsAt);
     if (overlap) return void res.status(409).json({ error: `Overlaps with "${overlap.name}". Only one giveaway can run at a time.` });
 
-    let igPost = null;
-    if (input.igPost) {
-      const found = await lookupIgPost(input.igPost);
-      if (found.error) return void res.status(found.error.status).json({ error: found.error.message });
-      igPost = found.post;
-    }
+    const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
+    const resolved = await resolvePosts(ig?.settings?.posts ?? [], []);
+    if ('error' in resolved) return void res.status(resolved.error!.status).json({ error: resolved.error!.message });
 
     let slug = slugify(input.name) || 'giveaway';
     for (let n = 2; await db.query.giveaways.findFirst({ where: eq(giveaways.slug, slug) }); n++) slug = `${slugify(input.name)}-${n}`;
@@ -264,12 +474,9 @@ export function createAdminRouter(client?: Client) {
           name: input.name,
           startsAt: input.startsAt,
           endsAt: input.endsAt,
-          entryMethods: input.entryMethods ?? ['discord'],
-          entryChannel: input.entryChannel ?? null,
-          igMediaId: igPost?.id ?? null,
-          igPostedAt: igPost ? new Date(igPost.postedAt) : null,
-          igPermalink: igPost?.permalink ?? null,
-          formFields: input.formFields,
+          baseWeight: input.baseWeight ?? 1,
+          platformSettings: settingsFrom(platforms, resolved.posts),
+          formFields: checked.formFields,
           reminderText: input.reminderText ?? null,
           maxParticipants: input.maxParticipants ?? null,
           ...(input.announcements ? { announcements: input.announcements } : {}),
@@ -282,92 +489,75 @@ export function createAdminRouter(client?: Client) {
           claimHours: input.claimHours ?? 12,
         })
         .returning();
-      if (input.rules.length) {
-        await tx.insert(giveawayRules).values(
-          input.rules.map((r, i) => ({
-            giveawayId: created!.id,
-            position: i + 1,
-            action: r.action,
-            maxCount: r.maxCount,
-            windowStart: r.windowStart ?? null,
-            windowEnd: r.windowEnd ?? null,
-            frequency: r.frequency ?? null,
-            options: r.options ?? {},
-          })),
-        );
-      }
+      await tx.insert(giveawayRules).values(ruleRows(platforms).map(({ id: _id, ...r }, i) => ({ ...r, giveawayId: created!.id, position: i + 1 })));
       return created!;
     });
-    await audit(g.id, req.actor!, 'giveaway.created', { name: g.name, igPost: igPost?.permalink ?? null });
-    if (igPost) inBackground(runCommentSync(g, 'post-set'));
-    res.status(201).json(await giveawayJson(g));
+    await audit(g.id, req.actor!, 'giveaway.created', { name: g.name, platforms: platforms.map(p => p.platform) });
+    if (resolved.posts.length) inBackground(runCommentSync(g, 'post-set'));
+    res.status(201).json(await giveawayJson(g, client));
   });
 
   router.get('/giveaways/:id', async (req: Req, res) => {
-    res.json(await giveawayJson(req.giveaway!));
+    res.json(await giveawayJson(req.giveaway!, client));
   });
+
+  /** Shared by PATCH and the dry run: validates an edit and returns what would be saved. */
+  async function prepareEdit(g: Giveaway, body: unknown) {
+    const parsed = updateSchema.safeParse(body);
+    if (!parsed.success) return { ok: false, status: 400, error: z.prettifyError(parsed.error) } as const;
+    const input = parsed.data;
+    const currentRules = await getRules(g.id);
+    const current = currentPlatforms(g, currentRules);
+    const platforms = input.platforms ?? platformsFromV1(input, current) ?? current;
+    const merged = {
+      startsAt: input.startsAt ?? g.startsAt,
+      endsAt: input.endsAt ?? g.endsAt,
+      platforms,
+      formFields: input.formFields ?? g.formFields,
+    };
+    const checked = crossCheck(merged);
+    if ('error' in checked) return { ok: false, status: 400, error: checked.error } as const;
+    const ruleIds = ruleRows(platforms).filter(r => r.id).map(r => r.id!);
+    if (ruleIds.some(id => !currentRules.some(c => c.id === id))) return { ok: false, status: 400, error: 'A rule id does not belong to this giveaway' } as const;
+    return { ok: true, input, platforms, merged, formFields: checked.formFields, currentRules } as const;
+  }
 
   router.patch('/giveaways/:id', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
-    const parsed = updateSchema.safeParse(req.body);
-    if (!parsed.success) return void res.status(400).json({ error: z.prettifyError(parsed.error) });
-    const input: GiveawayInput = parsed.data;
-    const currentRules = await getRules(g.id);
+    const prep = await prepareEdit(g, req.body);
+    if (!prep.ok) return void res.status(prep.status).json({ error: prep.error });
+    const { input, platforms, merged, formFields, currentRules } = prep;
 
-    const merged = {
-      entryMethods: input.entryMethods ?? g.entryMethods,
-      startsAt: input.startsAt ?? g.startsAt,
-      endsAt: input.endsAt ?? g.endsAt,
-      formFields: input.formFields ?? g.formFields,
-      rules: input.rules ?? currentRules,
-    };
-    const problem = crossCheck(merged);
-    if (problem) return void res.status(400).json({ error: problem });
     if ((input.startsAt || input.endsAt) && !g.closedAt) {
       const overlap = await findOverlap(merged.startsAt!, merged.endsAt, g.id);
       if (overlap) return void res.status(409).json({ error: `Overlaps with "${overlap.name}". Only one giveaway can run at a time.` });
     }
-    if (input.rules?.some(r => r.id && !currentRules.some(c => c.id === r.id))) {
-      return void res.status(400).json({ error: 'A rule id does not belong to this giveaway' });
-    }
 
-    // undefined = leave the post alone, null = clear it, anything else = look it up.
-    let postChange: { id: string | null; postedAt: Date | null; permalink: string | null } | undefined;
-    if (input.igPost === null) postChange = { id: null, postedAt: null, permalink: null };
-    else if (input.igPost) {
-      const found = await lookupIgPost(input.igPost);
-      if (found.error) return void res.status(found.error.status).json({ error: found.error.message });
-      postChange = { id: found.post.id, postedAt: new Date(found.post.postedAt), permalink: found.post.permalink };
-    }
+    const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
+    const resolved = await resolvePosts(ig?.settings?.posts ?? [], g.platformSettings.instagram?.posts ?? []);
+    if ('error' in resolved) return void res.status(resolved.error!.status).json({ error: resolved.error!.message });
+    const newPost = resolved.posts.some(p => !(g.platformSettings.instagram?.posts ?? []).some(o => o.id === p.id));
 
-    const { rules, igPost: _igPost, ...settings } = input;
+    const { platforms: _p, entryMethods: _m, entryChannel: _c, igPost: _i, rules: _r, formFields: _f, ...settings } = input;
     await db.transaction(async tx => {
       const changes = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined));
-      if (postChange) Object.assign(changes, { igMediaId: postChange.id, igPostedAt: postChange.postedAt, igPermalink: postChange.permalink });
-      await tx.update(giveaways).set({ ...changes, updatedAt: new Date() }).where(eq(giveaways.id, g.id));
+      await tx
+        .update(giveaways)
+        .set({ ...changes, formFields, platformSettings: settingsFrom(platforms, resolved.posts), updatedAt: new Date() })
+        .where(eq(giveaways.id, g.id));
 
-      if (rules) {
-        // Rules are replaced by the list sent: matched by id, new ones added, missing ones removed.
-        // Entries already earned under a removed rule stay; they just lose their rule label.
-        const keep = rules.filter(r => r.id).map(r => r.id!);
-        const removed = currentRules.filter(c => !keep.includes(c.id)).map(c => c.id);
-        if (removed.length) await tx.delete(giveawayRules).where(inArray(giveawayRules.id, removed));
-        for (const [i, r] of rules.entries()) {
-          const values = {
-            position: i + 1,
-            action: r.action,
-            maxCount: r.maxCount,
-            windowStart: r.windowStart ?? null,
-            windowEnd: r.windowEnd ?? null,
-            frequency: r.frequency ?? null,
-            options: r.options ?? {},
-          };
-          if (r.id) await tx.update(giveawayRules).set(values).where(eq(giveawayRules.id, r.id));
-          else await tx.insert(giveawayRules).values({ ...values, giveawayId: g.id });
-        }
+      // Rules are replaced by the list sent: matched by id, new ones added, missing ones removed.
+      // Activity is never deleted, so a removed rule just stops counting (and can come back).
+      const rows = ruleRows(platforms);
+      const keep = rows.filter(r => r.id).map(r => r.id!);
+      const removed = currentRules.filter(c => !keep.includes(c.id)).map(c => c.id);
+      if (removed.length) await tx.delete(giveawayRules).where(inArray(giveawayRules.id, removed));
+      for (const [i, { id, ...r }] of rows.entries()) {
+        if (id) await tx.update(giveawayRules).set({ ...r, position: i + 1 }).where(eq(giveawayRules.id, id));
+        else await tx.insert(giveawayRules).values({ ...r, position: i + 1, giveawayId: g.id });
       }
     });
-    await audit(g.id, req.actor!, 'giveaway.updated', { fields: Object.keys(input), ...(postChange ? { igPost: postChange.permalink } : {}) });
+    await audit(g.id, req.actor!, 'giveaway.updated', { fields: Object.keys(req.body ?? {}) });
     const updated = (await getGiveaway(g.id))!;
     // Later end time or a bigger cap: tell #community-updates.
     const extended: { endsAt?: Date; maxParticipants?: number } = {};
@@ -375,56 +565,85 @@ export function createAdminRouter(client?: Client) {
     if (updated.maxParticipants && (!g.maxParticipants || updated.maxParticipants > g.maxParticipants)) extended.maxParticipants = updated.maxParticipants;
     if (Object.keys(extended).length && statusOf(updated) !== 'closed') inBackground(announceExtended(client, updated, extended));
     // A new post: read its comments now instead of waiting for the next scheduled read.
-    if (postChange?.id && postChange.id !== g.igMediaId) inBackground(runCommentSync(updated, 'post-set'));
-    res.json(await giveawayJson(updated));
+    if (newPost) inBackground(runCommentSync(updated, 'post-set'));
+    res.json(await giveawayJson(updated, client));
+  });
+
+  // Dry run: what an edit would do to eligibility and entries, without saving anything.
+  router.post('/giveaways/:id/preview', async (req: Req, res) => {
+    const g = req.giveaway!;
+    const prep = await prepareEdit(g, req.body);
+    if (!prep.ok) return void res.status(prep.status).json({ error: prep.error });
+    let tempId = -1;
+    const proposed: EngineRule[] = ruleRows(prep.platforms).map((r, i) => ({ ...r, id: r.id ?? tempId--, position: i + 1 }));
+    const previewG = { ...g, baseWeight: prep.input.baseWeight ?? g.baseWeight, startsAt: prep.merged.startsAt, endsAt: prep.merged.endsAt };
+    const before = await computePeople(g, client);
+    const after = await computePeople(previewG, client, proposed);
+    const byId = new Map(after.map(p => [p.id, p]));
+    const changed = before
+      .map(b => ({ b, a: byId.get(b.id)! }))
+      .filter(({ a, b }) => a.result.eligible !== b.result.eligible || a.result.entries.total !== b.result.entries.total)
+      .map(({ a, b }) => ({
+        personId: b.id,
+        discord: b.discordUsername,
+        instagram: b.igUsername,
+        before: { eligible: b.result.eligible, entries: b.result.entries.total },
+        after: { eligible: a.result.eligible, entries: a.result.entries.total },
+      }));
+    res.json({
+      becomeEligible: changed.filter(c => !c.before.eligible && c.after.eligible).length,
+      becomeIneligible: changed.filter(c => c.before.eligible && !c.after.eligible).length,
+      entriesBefore: before.reduce((s, p) => s + p.result.entries.total, 0),
+      entriesAfter: after.reduce((s, p) => s + p.result.entries.total, 0),
+      changed,
+    });
   });
 
   router.post('/giveaways/:id/close', requireActor, async (req: Req, res) => {
     const closed = await closeGiveaway(req.giveaway!.id, req.actor!, 'early');
     if (!closed) return void res.status(409).json({ error: 'Already closed' });
     inBackground(runFinalSync(closed));
-    res.json(await giveawayJson(closed));
+    res.json(await giveawayJson(closed, client));
   });
 
   // Permanent delete. Open giveaways must be closed first; needs ?confirm=<giveaway name> unless in test mode.
   router.delete('/giveaways/:id', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
     if (statusOf(g) === 'open') return void res.status(409).json({ error: 'Close this giveaway before deleting it.' });
-    // Everyone gets deleted, disqualified entrants included, so count them all.
-    const entrantsSoFar = (await entrantReport(g.id)).entrants.length;
+    const everyone = (await computePeople(g)).length;
     const confirm = typeof req.query.confirm === 'string' ? req.query.confirm.trim() : '';
-    // Every delete needs the exact name typed, except test-mode giveaways.
     if (!g.testMode && confirm !== (g.name ?? g.slug)) {
       return void res.status(400).json({
-        error: `To permanently delete this giveaway${entrantsSoFar ? ` and its ${entrantsSoFar} entrant${entrantsSoFar === 1 ? '' : 's'}` : ''}, add ?confirm=<giveaway name> (exactly "${g.name ?? g.slug}").`,
+        error: `To permanently delete this giveaway${everyone ? ` and its ${everyone} ${everyone === 1 ? 'person' : 'people'}` : ''}, add ?confirm=<giveaway name> (exactly "${g.name ?? g.slug}").`,
         requiresConfirm: true,
-        entrants: entrantsSoFar,
+        entrants: everyone,
       });
     }
     const result = await deleteGiveaway(g, req.actor!);
     res.json({ deleted: true, id: g.id, name: g.name, entrants: result.entrants });
   });
 
-  // "Sync now": read the post's comments immediately and return the result.
+  // "Sync now": read the posts' comments and tagged posts immediately and return the result.
   router.post('/giveaways/:id/sync', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
-    if (!g.igMediaId && !(await hasTagRules(g))) return void res.status(400).json({ error: 'Set the giveaway\'s Instagram post (or add a tagged-post rule) first' });
+    if (!g.platformSettings.instagram?.posts?.length && !(await hasTagRules(g))) {
+      return void res.status(400).json({ error: "Add the giveaway's Instagram post (or a tagged-post rule) first" });
+    }
     await runCommentSync(g, 'manual');
     res.json({ igSync: await getSyncStatus(g.id) });
   });
 
-  // Instagram connection health: token expiry and renewal (never the token itself).
+  // ----- Instagram
+
   router.get('/instagram/status', async (_req, res) => {
     res.json(await tokenStatus());
   });
 
-  // Renew the token now instead of waiting for the weekly renewal.
   router.post('/instagram/renew', requireActor, async (_req, res) => {
     await renewTokenIfDue(true);
     res.json(await tokenStatus());
   });
 
-  // Post picker: @BostonBlerds' recent posts with thumbnails.
   router.get('/instagram/posts', async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 12, 1), 50);
     try {
@@ -434,7 +653,6 @@ export function createAdminRouter(client?: Client) {
     }
   });
 
-  // Paste a link → the post (or a clear error), e.g. to preview it before saving.
   router.get('/instagram/resolve', async (req, res) => {
     const url = typeof req.query.url === 'string' ? req.query.url : '';
     if (!url) return void res.status(400).json({ error: 'Pass ?url=<Instagram post link or media ID>' });
@@ -443,53 +661,102 @@ export function createAdminRouter(client?: Client) {
     res.json(found.post);
   });
 
+  // ----- People
+
+  // v2: everyone with activity, with eligibility, what's missing, entries and a breakdown.
+  router.get('/giveaways/:id/people', async (req: Req, res) => {
+    const g = req.giveaway!;
+    const rules = await getRules(g.id);
+    res.json((await computePeople(g, client)).map(p => personJson(p, rules)));
+  });
+
+  // v1 shape (deprecated): entrants + "unmatched" (people active on Instagram who haven't entered on Discord).
   router.get('/giveaways/:id/entrants', async (req: Req, res) => {
     const g = req.giveaway!;
-    const { entrants, unmatched } = await entrantReport(g.id);
-    const members = await serverMemberIds(client);
+    const rules = await getRules(g.id);
+    const people = await computePeople(g, client);
+    const discordEntry = takesDiscordEntries(rules);
+    const asV1 = (p: PersonReport) => ({
+      ...p,
+      totalEntries: p.result.entries.total,
+      eligible: p.result.eligible,
+      bonuses: p.result.breakdown.flatMap(b => {
+        const r = rules.find(x => x.id === b.ruleId)!;
+        return Array.from({ length: b.count }, () => ({ ruleId: b.ruleId, action: toV1Action(r.action), label: null, weight: b.weight }));
+      }),
+      activities: undefined,
+      result: undefined,
+    });
     res.json({
-      // inServer is null for Instagram-only entrants (no Discord account) or when the bot is offline.
-      entrants: entrants.map(e => ({ ...e, inServer: members && e.discordId ? members.has(e.discordId) : null })),
-      unmatched,
+      entrants: people.filter(p => !discordEntry || p.discordId).map(asV1),
+      unmatched: people.filter(p => discordEntry && !p.discordId).map(asV1),
     });
   });
 
-  router.post('/giveaways/:id/bonuses', requireActor, async (req: Req, res) => {
-    const body = z.object({ entrantId: z.number().int(), label: z.string().min(1).max(100) }).safeParse(req.body);
-    if (!body.success) return void res.status(400).json({ error: z.prettifyError(body.error) });
-    const bonus = await addManualBonus(req.giveaway!.id, body.data.entrantId, body.data.label, req.actor!);
-    if (!bonus) return void res.status(404).json({ error: 'Entrant not found' });
-    res.status(201).json(bonus);
-  });
-
-  router.delete('/giveaways/:id/bonuses/:bonusId', requireActor, async (req: Req, res) => {
-    const reason = z.object({ reason: z.string().min(1).max(200) }).safeParse(req.body ?? {});
-    const revoked = await revokeBonus(req.giveaway!.id, Number(req.params.bonusId), req.actor!, reason.success ? reason.data.reason : 'Removed by admin');
-    if (!revoked) return void res.status(404).json({ error: 'Bonus not found or already removed' });
-    res.json(revoked);
-  });
-
-  router.post('/giveaways/:id/entrants/:entrantId/disqualify', requireActor, async (req: Req, res) => {
+  router.post('/giveaways/:id/people/:entrantId/disqualify', requireActor, disqualify);
+  router.post('/giveaways/:id/entrants/:entrantId/disqualify', requireActor, disqualify);
+  async function disqualify(req: Req, res: Response) {
     const body = z.object({ reason: z.string().min(1).max(200) }).safeParse(req.body);
     if (!body.success) return void res.status(400).json({ error: 'A reason is required' });
     const e = await setEntrantRevoked(req.giveaway!.id, Number(req.params.entrantId), req.actor!, body.data.reason);
-    if (!e) return void res.status(404).json({ error: 'Entrant not found' });
+    if (!e) return void res.status(404).json({ error: 'Person not found' });
     res.json(e);
+  }
+
+  router.post('/giveaways/:id/people/:entrantId/restore', requireActor, restore);
+  router.post('/giveaways/:id/entrants/:entrantId/restore', requireActor, restore);
+  async function restore(req: Req, res: Response) {
+    const e = await setEntrantRevoked(req.giveaway!.id, Number(req.params.entrantId), req.actor!, null);
+    if (!e) return void res.status(404).json({ error: 'Person not found' });
+    res.json(e);
+  }
+
+  // Overrides: count a requirement as met (grandfathering / confirming a manual check), or a manual entry.
+  router.post('/giveaways/:id/people/:entrantId/overrides', requireActor, async (req: Req, res) => {
+    const g = req.giveaway!;
+    const body = z
+      .discriminatedUnion('kind', [
+        z.object({ kind: z.literal('requirement_met'), ruleId: z.number().int(), reason: unset(z.string().max(200)) }),
+        z.object({ kind: z.literal('manual_entry'), label: z.string().min(1).max(100), weight: unset(z.number().int().min(1).max(1000)).transform(v => v ?? 1), reason: unset(z.string().max(200)) }),
+      ])
+      .safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: z.prettifyError(body.error) });
+    if (body.data.kind === 'requirement_met') {
+      const rule = (await getRules(g.id)).find(r => r.id === (body.data as { ruleId: number }).ruleId);
+      if (!rule || rule.type !== 'required') return void res.status(400).json({ error: 'ruleId must be one of this giveaway\'s required rules' });
+    }
+    const row = await addOverride(g.id, Number(req.params.entrantId), body.data as Parameters<typeof addOverride>[2], req.actor!);
+    if (!row) return void res.status(404).json({ error: 'Person not found' });
+    res.status(201).json(row);
   });
 
-  router.post('/giveaways/:id/entrants/:entrantId/restore', requireActor, async (req: Req, res) => {
-    const e = await setEntrantRevoked(req.giveaway!.id, Number(req.params.entrantId), req.actor!, null);
-    if (!e) return void res.status(404).json({ error: 'Entrant not found' });
-    res.json(e);
+  router.delete('/giveaways/:id/overrides/:overrideId', requireActor, async (req: Req, res) => {
+    const row = await revokeOverride(req.giveaway!.id, Number(req.params.overrideId), req.actor!);
+    if (!row) return void res.status(404).json({ error: 'Override not found or already removed' });
+    res.json(row);
+  });
+
+  // v1 manual bonuses (deprecated) = manual-entry overrides.
+  router.post('/giveaways/:id/bonuses', requireActor, async (req: Req, res) => {
+    const body = z.object({ entrantId: z.number().int(), label: z.string().min(1).max(100) }).safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: z.prettifyError(body.error) });
+    const row = await addOverride(req.giveaway!.id, body.data.entrantId, { kind: 'manual_entry', label: body.data.label, weight: 1 }, req.actor!);
+    if (!row) return void res.status(404).json({ error: 'Entrant not found' });
+    res.status(201).json(row);
+  });
+  router.delete('/giveaways/:id/bonuses/:bonusId', requireActor, async (req: Req, res) => {
+    const row = await revokeOverride(req.giveaway!.id, Number(req.params.bonusId), req.actor!);
+    if (!row) return void res.status(404).json({ error: 'Bonus not found or already removed' });
+    res.json(row);
   });
 
   // ----- Winners
 
   router.get('/giveaways/:id/winners', async (req: Req, res) => {
     const g = req.giveaway!;
-    const { entrants } = await entrantReport(g.id);
-    const byId = new Map(entrants.map(e => [e.id, e]));
-    res.json((await listWinners(g.id)).map(w => ({ ...w, entrant: byId.get(w.entrantId) ?? null })));
+    const people = await computePeople(g, client);
+    const byId = new Map(people.map(p => [p.id, p]));
+    res.json((await listWinners(g.id)).map(w => ({ ...w, entrant: byId.get(w.entrantId) ? { ...byId.get(w.entrantId)!, activities: undefined } : null })));
   });
 
   /** Checks shared by picking and drawing: the giveaway is closed and a winner slot is open. */
@@ -499,43 +766,43 @@ export function createAdminRouter(client?: Client) {
     return null;
   }
 
-  // Deprecated alias for older dashboard code: same as POST /giveaways/:id/winners (manual pick).
-  router.post('/giveaways/:id/winner', requireActor, async (req: Req, res) => {
+  async function pickWinner(req: Req, res: Response, v1 = false) {
     const g = req.giveaway!;
-    const body = z.object({ entrantId: z.number().int() }).safeParse(req.body);
-    if (!body.success) return void res.status(400).json({ error: 'entrantId is required' });
+    const body = z.object({ entrantId: unset(z.number().int()), personId: unset(z.number().int()) }).safeParse(req.body);
+    const id = body.success ? (body.data.personId ?? body.data.entrantId) : undefined;
+    if (!id) return void res.status(400).json({ error: 'personId is required' });
     const problem = await canSelect(g);
     if (problem) return void res.status(409).json({ error: problem });
-    const pick = (await eligiblePool(g, client)).find(p => p.entrant.id === body.data.entrantId);
-    if (!pick) return void res.status(400).json({ error: "That entrant can't win: disqualified, left the server, or already picked." });
-    const w = await selectWinner(client, g, pick.entrant, req.actor!);
-    res.json({ winner: pick.entrant, record: w });
-  });
-
-  // Manual pick from the entrants list.
-  router.post('/giveaways/:id/winners', requireActor, async (req: Req, res) => {
-    const g = req.giveaway!;
-    const body = z.object({ entrantId: z.number().int() }).safeParse(req.body);
-    if (!body.success) return void res.status(400).json({ error: 'entrantId is required' });
-    const problem = await canSelect(g);
-    if (problem) return void res.status(409).json({ error: problem });
-    const pick = (await eligiblePool(g, client)).find(p => p.entrant.id === body.data.entrantId);
-    if (!pick) return void res.status(400).json({ error: "That entrant can't win: disqualified, left the server, or already picked." });
-    const w = await selectWinner(client, g, pick.entrant, req.actor!);
+    const pick = (await eligiblePool(g, client)).find(p => p.person.id === id);
+    if (!pick) return void res.status(400).json({ error: "That person can't win: not eligible, disqualified, or already picked." });
+    const w = await selectWinner(client, g, pick.person, req.actor!);
+    if (v1) return void res.json({ winner: { ...pick.person, activities: undefined }, record: w });
     res.status(201).json(w);
-  });
+  }
+  // Deprecated alias for older dashboard code.
+  router.post('/giveaways/:id/winner', requireActor, (req: Req, res) => pickWinner(req, res, true));
+  router.post('/giveaways/:id/winners', requireActor, (req: Req, res) => pickWinner(req, res));
 
-  // "Draw at random" (weighted by entries), for manual-select giveaways that want a random pick.
   router.post('/giveaways/:id/winners/draw', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
     const problem = await canSelect(g);
     if (problem) return void res.status(409).json({ error: problem });
     const w = await drawWinner(client, g, req.actor!);
-    if (!w) return void res.status(409).json({ error: 'No eligible entrants left to draw.' });
+    if (!w) return void res.status(409).json({ error: 'No eligible people left to draw.' });
     res.status(201).json(w);
   });
 
-  // "Notify now": send the winner's DM without waiting for the delay.
+  // Winner checks (e.g. "follows @BostonBlerds"): confirm or reject one.
+  router.post('/giveaways/:id/winners/:winnerId/checks/:ruleId', requireActor, async (req: Req, res) => {
+    const body = z.object({ confirmed: z.boolean() }).safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: 'confirmed (true/false) is required' });
+    const w = (await listWinners(req.giveaway!.id)).find(x => x.id === Number(req.params.winnerId));
+    if (!w) return void res.status(404).json({ error: 'Winner not found' });
+    const result = await confirmWinnerCheck(client, w.id, Number(req.params.ruleId), body.data.confirmed, req.actor!);
+    if (!result.ok) return void res.status(409).json({ error: result.error });
+    res.json(result.winner);
+  });
+
   router.post('/giveaways/:id/winners/:winnerId/notify', requireActor, async (req: Req, res) => {
     if (!client?.isReady()) return void res.status(503).json({ error: 'The bot is not connected to Discord right now.' });
     const w = (await listWinners(req.giveaway!.id)).find(x => x.id === Number(req.params.winnerId));
@@ -545,7 +812,6 @@ export function createAdminRouter(client?: Client) {
     res.json({ notified: true });
   });
 
-  // Manual notify (or DMs closed): admins report what the winner said.
   router.post('/giveaways/:id/winners/:winnerId/outcome', requireActor, async (req: Req, res) => {
     const body = z.object({ outcome: z.enum(['accepted', 'declined']) }).safeParse(req.body);
     if (!body.success) return void res.status(400).json({ error: 'outcome must be "accepted" or "declined"' });
@@ -560,12 +826,13 @@ export function createAdminRouter(client?: Client) {
     res.json(await auditRows(req.giveaway!.id));
   });
 
+  // ----- Exports (eligibility and entries are calculated here, same as the dashboard and draws)
+
   router.get('/giveaways/:id/export/:file', async (req: Req, res) => {
     const g = req.giveaway!;
     const file = req.params.file as string;
     const base = (g.name ?? g.slug).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const send = (suffix: string, csv: string) =>
-      res.type('text/csv').attachment(`${base}-${suffix}.csv`).send(csv);
+    const send = (suffix: string, csv: string) => res.type('text/csv').attachment(`${base}-${suffix}.csv`).send(csv);
 
     if (file === 'audit.csv') {
       const rows = await auditRows(g.id, 100_000);
@@ -573,44 +840,57 @@ export function createAdminRouter(client?: Client) {
     }
 
     const rules = await getRules(g.id);
-    const { entrants } = await entrantReport(g.id);
-    const members = await serverMemberIds(client);
-    const inServer = (id: string | null) => (members && id ? members.has(id) : '');
-    // Discord entrants must still be in the server; Instagram-only entrants have no server to be in.
-    const eligible = entrants.filter(e => !e.revokedAt && (!members || !e.discordId || members.has(e.discordId)));
-    const ruleName = (ruleId: number | null, action: string | null, label: string | null) => {
-      const r = rules.find(x => x.id === ruleId);
-      return r ? describeRule(r) : action === 'manual' ? `Manual: ${label ?? ''}` : `${ACTION_LABELS[action ?? ''] ?? action} (removed rule)`;
+    const people = await computePeople(g, client);
+    const label = (id: number) => {
+      const r = rules.find(x => x.id === id);
+      return r ? describeRule(r) : `rule #${id}`;
     };
 
     if (file === 'entries.csv') {
-      // One row per entry: what the spinner loads. Disqualified people and people who left the server are excluded.
-      const rows = eligible.flatMap(e => [
-        [e.discordUsername, e.discordId, e.igUsername, 'Base entry'],
-        ...e.bonuses.map(b => [e.discordUsername, e.discordId, e.igUsername, ruleName(b.ruleId, b.action, b.label)]),
-      ]);
+      // One row per entry (weights expanded), eligible people only: what a random picker loads.
+      const rows = people
+        .filter(p => p.result.eligible)
+        .flatMap(p => {
+          const who = [p.discordUsername, p.discordId, p.igUsername];
+          return [
+            ...Array.from({ length: p.result.entries.base }, () => [...who, 'Base entry']),
+            ...p.result.breakdown.flatMap(b => Array.from({ length: b.entries }, () => [...who, label(b.ruleId)])),
+            ...p.overrides.filter(o => o.kind === 'manual_entry').flatMap(o => Array.from({ length: o.weight }, () => [...who, `Manual: ${o.label ?? ''}`])),
+          ];
+        });
       return void send('entries', toCsv(['discord_username', 'discord_id', 'ig_username', 'entry_source'], rows));
     }
 
     if (file === 'entrants.csv') {
-      const fields = g.formFields.filter(f => f.type !== 'ig_username');
+      const fields = g.formFields.filter(f => !isInstagramField(f));
+      const bonusRules = rules.filter(r => r.type === 'bonus');
       const headers = [
         'discord_username', 'discord_id', 'ig_username',
         ...fields.map(f => f.label),
-        ...rules.map(describeRule), 'manual_entries',
-        'total_entries', 'entered_at', 'in_server', 'disqualified_reason',
+        'eligible', 'missing',
+        ...bonusRules.map(r => `${describeRule(r)} (count)`),
+        'manual_entries', 'base_entries', 'bonus_entries', 'total_entries',
+        'in_server', 'disqualified_reason', 'first_seen',
       ];
-      const rows = entrants.map(e => [
-        e.discordUsername, e.discordId, e.igUsername,
-        ...fields.map(f => e.answers[f.id] ?? ''),
-        ...rules.map(r => e.bonuses.filter(b => b.ruleId === r.id).length),
-        e.bonuses.filter(b => b.action === 'manual').length,
-        e.totalEntries, e.createdAt, inServer(e.discordId), e.revokedReason ?? '',
+      const rows = people.map(p => [
+        p.discordUsername, p.discordId, p.igUsername,
+        ...fields.map(f => p.answers[f.id] ?? ''),
+        p.result.eligible, p.result.missing.map(id => ruleLabel(rules.find(r => r.id === id) ?? { platform: 'discord', action: 'enter', options: {} })).join('; '),
+        ...bonusRules.map(r => p.result.breakdown.find(b => b.ruleId === r.id)?.count ?? 0),
+        p.result.entries.manual, p.result.entries.base, p.result.entries.bonus, p.result.entries.total,
+        p.inServer ?? '', p.revokedReason ?? '', p.createdAt,
       ]);
       return void send('entrants', toCsv(headers, rows));
     }
 
-    res.status(404).json({ error: 'Unknown export. Use entries.csv, entrants.csv or audit.csv' });
+    if (file === 'activity.csv') {
+      const rows = people.flatMap(p =>
+        p.activities.map(a => [a.at, a.platform, a.action, p.discordUsername, p.igUsername, a.sourceRef, a.removedAt ? a.removedReason ?? 'removed' : '', JSON.stringify(a.details)]),
+      );
+      return void send('activity', toCsv(['when', 'platform', 'action', 'discord_username', 'ig_username', 'source_id', 'removed', 'details'], rows));
+    }
+
+    res.status(404).json({ error: 'Unknown export. Use entries.csv, entrants.csv, activity.csv or audit.csv' });
   });
 
   return router;

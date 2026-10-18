@@ -37,11 +37,18 @@ await pool.query(`INSERT INTO bonuses (giveaway_id, ig_username, type, source, s
 // --- 2. Run the new migrations ---------------------------------------------------
 await migrate(db, { migrationsFolder: `${repo}/drizzle` });
 const gta = (await pool.query(`SELECT * FROM giveaways WHERE slug='gta6-2026'`)).rows[0];
-ok('GTA becomes giveaway #1 with settings', gta.name === 'GTA VI Giveaway' && gta.entry_channel === 'gta-giveaway' && gta.form_fields[0].type === 'ig_username', gta);
+ok('GTA becomes giveaway #1 with settings', gta.id === 1 && gta.name === 'GTA VI Giveaway' && gta.platform_settings.discord?.channel === 'gta-giveaway', gta);
+ok('GTA form: Instagram account field, locked', gta.form_fields[0].type === 'account' && gta.form_fields[0].locked === true, gta.form_fields);
 const gtaRules = (await pool.query(`SELECT * FROM giveaway_rules WHERE giveaway_id=1 ORDER BY position`)).rows;
-ok('GTA gets comment + story rules', gtaRules.length === 2 && gtaRules[0].action === 'ig_comment' && gtaRules[0].options.requireTag === true && gtaRules[1].action === 'ig_story', gtaRules);
-const legacy = (await pool.query(`SELECT * FROM bonuses WHERE source_ref='c-legacy'`)).rows[0];
-ok('legacy comment bonus mapped to the comment rule', legacy.action === 'ig_comment' && legacy.rule_id === gtaRules[0].id, legacy);
+const sig = (r: any) => `${r.platform}:${r.action}:${r.type}`;
+ok('GTA rules: Discord enter + member required, IG comment + story bonus',
+  gtaRules.some(r => sig(r) === 'discord:enter:required') && gtaRules.some(r => sig(r) === 'discord:member:required')
+  && gtaRules.some(r => sig(r) === 'instagram:comment:bonus' && r.options.requireTag === true) && gtaRules.some(r => sig(r) === 'instagram:story:bonus'), gtaRules.map(sig));
+const acts = (await pool.query(`SELECT * FROM activities WHERE giveaway_id=1 ORDER BY id`)).rows;
+ok('entrant → Discord enter activity; legacy bonus → comment activity',
+  acts.some(a => a.platform === 'discord' && a.action === 'enter' && a.discord_id === 'd1') && acts.some(a => a.action === 'comment' && a.source_ref === 'c-legacy'), acts);
+const oldTables = (await pool.query(`SELECT to_regclass('bonuses') AS b`)).rows[0].b;
+ok('v1 bonuses table dropped', oldTables === null, oldTables);
 
 // The upgraded GTA giveaway runs Oct 19 – Nov 20, 2026. Close it so the tests' own
 // "starting now" giveaways never overlap it, whatever today's date is.
@@ -68,61 +75,67 @@ ok('list giveaways', list.status === 200 && list.json.some((g: any) => g.name ==
 
 const now = Date.now();
 const iso = (ms: number) => new Date(ms).toISOString();
+const discordReq = [{ action: 'enter', type: 'required' }, { action: 'member', type: 'required' }];
 const testGiveaway = {
   name: 'Test Giveaway',
   startsAt: iso(now - 60 * 60e3),
   endsAt: iso(now + 20 * 60 * 60e3),
-  entryChannel: 'test-giveaway',
-  formFields: [
-    { id: 'ig', label: 'Instagram username', type: 'ig_username', required: true },
-    { id: 'platform', label: 'What do you play on?', type: 'select', required: true, options: ['PS5', 'Xbox', 'PC'] },
+  baseWeight: 1,
+  platforms: [
+    { platform: 'discord', settings: { channel: '#Test-Giveaway' }, rules: discordReq },
+    { platform: 'instagram', settings: { posts: [] }, rules: [
+      { action: 'story', type: 'bonus', weight: 1, maxCount: 1 },
+      { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { requireTag: true } },
+    ] },
   ],
+  formFields: [{ id: 'platform', label: 'What do you play on?', type: 'select', required: true, options: ['PS5', 'Xbox', 'PC'] }],
   reminderText: "Don't forget to follow [@BostonBlerds](https://instagram.com/bostonblerds)!",
-  rules: [
-    { action: 'ig_story', maxCount: 1 },
-    { action: 'ig_comment', maxCount: 1, options: { requireTag: true } },
-  ],
 };
+const igRules = (j: any) => j.platforms.find((p: any) => p.platform === 'instagram').rules;
 
 ok('create without X-Admin-User → 400', (await api('POST', '/giveaways', testGiveaway, { actor: null })).status === 400);
-const noIgField = await api('POST', '/giveaways', { ...testGiveaway, formFields: [testGiveaway.formFields[1]] });
-ok('IG rules without an IG username field → 400', noIgField.status === 400 && /Instagram username field/.test(noIgField.json.error), noIgField.json);
+const noChannel = await api('POST', '/giveaways', { ...testGiveaway, platforms: [{ platform: 'discord', rules: discordReq }] });
+ok('Discord enter without a channel → 400', noChannel.status === 400 && /channel/.test(noChannel.json.error), noChannel.json);
+const wrongAction = await api('POST', '/giveaways', { ...testGiveaway, platforms: [{ platform: 'discord', settings: { channel: 'x' }, rules: [{ action: 'story' }] }] });
+ok('action on the wrong platform → 400', wrongAction.status === 400 && /isn't a discord action/.test(wrongAction.json.error), wrongAction.json);
+const noRules = await api('POST', '/giveaways', { ...testGiveaway, platforms: [{ platform: 'discord', settings: { channel: 'x' }, rules: [] }] });
+ok('platform without rules → 400', noRules.status === 400, noRules.json);
 const badLink = await api('GET', '/instagram/resolve?url=not-a-link');
 ok('resolve: garbage link → 404 with a clear message', badLink.status === 404 && /instagram\.com\/p/.test(badLink.json.error), badLink.json);
 const badDates = await api('POST', '/giveaways', { ...testGiveaway, endsAt: iso(now - 2 * 60 * 60e3) });
 ok('end before start → 400', badDates.status === 400, badDates.json);
 
 const created = await api('POST', '/giveaways', testGiveaway);
-ok('create giveaway → 201, open', created.status === 201 && created.json.status === 'open' && created.json.rules.length === 2, created.json);
+ok('create giveaway → 201, open, 2 platforms', created.status === 201 && created.json.status === 'open' && created.json.platforms.length === 2, created.json);
+ok('channel normalized', created.json.platforms[0].settings.channel === 'test-giveaway', created.json.platforms[0]);
+ok('Instagram account field added + locked (Discord entry + Instagram)',
+  created.json.formFields[0].type === 'account' && created.json.formFields[0].locked === true && created.json.formFields.length === 2, created.json.formFields);
+ok('rules have labels', igRules(created.json).every((r: any) => r.label?.startsWith('Instagram:')), igRules(created.json));
 const gid = created.json.id;
 
 const overlap = await api('POST', '/giveaways', { ...testGiveaway, name: 'Overlapping' });
 ok('overlapping giveaway → 409', overlap.status === 409, overlap.json);
 
+// The giveaway post (set directly: no Instagram connection in tests). Stories count once it's up.
+await pool.query(`UPDATE giveaways SET platform_settings = jsonb_set(platform_settings, '{instagram,posts}', $2::jsonb) WHERE id = $1`,
+  [gid, JSON.stringify([{ id: 'p1', permalink: 'https://instagram.com/p/p1', postedAt: iso(now - 2 * 60 * 60e3) }])]);
+
 // Add an "event" window rule: 5 Stories during the next 2 hours.
-const eventRule = { action: 'ig_story', maxCount: 5, windowStart: iso(now - 30 * 60e3), windowEnd: iso(now + 2 * 60 * 60e3) };
-const patched = await api('PATCH', `/giveaways/${gid}`, {
-  rules: [...created.json.rules.map((r: any) => ({ id: r.id, action: r.action, maxCount: r.maxCount, options: r.options })), eventRule],
-});
-ok('add event rule via PATCH', patched.status === 200 && patched.json.rules.length === 3, patched.json);
-ok('rule descriptions are readable', patched.json.rules.some((r: any) => /Story mention \(max 5, /.test(r.description)), patched.json.rules.map((r: any) => r.description));
+const keepRules = (j: any) => j.platforms.map((p: any) => ({ platform: p.platform, settings: p.platform === 'instagram' ? { posts: p.settings.posts.map((x: any) => x.id) } : p.settings, rules: p.rules.map(({ label, description, position, ...r }: any) => r) }));
+const withEvent = keepRules((await api('GET', `/giveaways/${gid}`)).json);
+withEvent[1].rules.push({ action: 'story', type: 'bonus', weight: 1, maxCount: 5, windowStart: iso(now - 30 * 60e3), windowEnd: iso(now + 2 * 60 * 60e3) });
+const patched = await api('PATCH', `/giveaways/${gid}`, { platforms: withEvent });
+ok('add event rule via PATCH (post kept)', patched.status === 200 && igRules(patched.json).length === 3 && patched.json.platforms[1].settings.posts[0]?.id === 'p1', patched.json);
+ok('rule descriptions are readable', igRules(patched.json).some((r: any) => /bonus ×1, max 5, /.test(r.description)), igRules(patched.json).map((r: any) => r.description));
 
 // Dashboard forms often send null for empty optional fields.
 const nullPatch = await api('PATCH', `/giveaways/${gid}`, {
   reminderText: null, maxParticipants: null, testMode: null, announcements: null,
-  winnerNotify: null, claimHours: null, formFields: null, rules: null,
+  winnerNotify: null, claimHours: null, formFields: null, platforms: null, baseWeight: null,
 });
-ok('PATCH with nulls → 200, nulls clear or keep', nullPatch.status === 200 && nullPatch.json.reminderText === null && nullPatch.json.rules.length === 3 && nullPatch.json.formFields.length === 2 && nullPatch.json.claimHours === 12, nullPatch.json);
-const nullFieldPatch = await api('PATCH', `/giveaways/${gid}`, {
-  formFields: [
-    { id: 'ig', label: 'Instagram username', type: 'ig_username', required: true, placeholder: null, options: null },
-    { id: 'platform', label: 'What do you play on?', type: 'select', required: true, placeholder: null, options: ['PS5', 'Xbox', 'PC'] },
-  ],
-  rules: nullPatch.json.rules.map((r: any) => ({ ...r, frequency: null, options: r.options.requireTag ? { requireTag: true } : null })),
-});
-ok('form fields + rules with null sub-fields → 200', nullFieldPatch.status === 200 && nullFieldPatch.json.rules.length === 3, nullFieldPatch.json);
+ok('PATCH with nulls → 200, nulls clear or keep', nullPatch.status === 200 && nullPatch.json.reminderText === null && igRules(nullPatch.json).length === 3 && nullPatch.json.formFields.length === 2 && nullPatch.json.claimHours === 12, nullPatch.json);
 
-// --- 4. Engine: entries + Instagram actions --------------------------------------
+// --- 4. Engine: entries + Instagram activity -------------------------------------
 const svc = await import(`${repo}/src/giveaway/service.ts`);
 const open = await svc.getOpenGiveaway();
 ok('open giveaway is the test one', open?.id === gid, open);
@@ -136,80 +149,111 @@ const conflict = await svc.submitEntry({ giveaway: open, discordId: 'u2', discor
 ok('IG username already claimed → conflict', conflict.status === 'conflict', conflict);
 await svc.submitEntry({ giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'sam_ig', platform: 'Xbox' } });
 
-const award = (action: string, ig: string, ref: string, taggedFriend?: boolean) =>
-  svc.awardAction({ giveaway: open, action, igUsername: ig, at: new Date(), sourceRef: ref, source: 'ig_webhook', ...(taggedFriend !== undefined ? { taggedFriend } : {}) });
-ok('comment w/o tag → no-rule', (await award('ig_comment', 'alex.plays', 'c1', false)) === 'no-rule');
-ok('comment with tag → awarded', (await award('ig_comment', 'alex.plays', 'c2', true)) === 'awarded');
-ok('same comment again → duplicate', (await award('ig_comment', 'alex.plays', 'c2', true)) === 'duplicate');
-const stories = [];
-for (let i = 1; i <= 7; i++) stories.push(await award('ig_story', 'alex.plays', `s${i}`));
-ok('7 stories during event: 5 event + 1 general + 1 nothing', JSON.stringify(stories) === JSON.stringify(['awarded', 'awarded', 'awarded', 'awarded', 'awarded', 'awarded', 'no-rule']), stories);
-ok('own account never earns', (await award('ig_story', 'bostonblerds', 'own1')) === 'own-account');
-ok('unmatched story (not entered yet) still recorded', (await award('ig_story', 'newfan', 'n1')) === 'awarded');
+const record = (action: string, ig: string, ref: string, details: Record<string, unknown> = {}) =>
+  svc.recordInstagramActivity({ giveaway: open, action, igUsername: ig, at: new Date(), sourceRef: ref, details });
+ok('comment w/o tag → recorded', (await record('comment', 'alex.plays', 'c1', { taggedFriend: false })) === 'recorded');
+ok('comment with tag → recorded', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true })) === 'recorded');
+ok('same comment again → duplicate', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true })) === 'duplicate');
+for (let i = 1; i <= 7; i++) await record('story', 'alex.plays', `s${i}`);
+ok('own account never recorded', (await record('story', 'bostonblerds', 'own1')) === 'own-account');
+ok('story from someone not entered yet → recorded', (await record('story', 'newfan', 'n1')) === 'recorded');
 
-// --- 5. Admin actions + reporting ------------------------------------------------
-let ents = await api('GET', `/giveaways/${gid}/entrants`);
-const alex = ents.json.entrants.find((e: any) => e.discordUsername === 'alex');
-const sam = ents.json.entrants.find((e: any) => e.discordUsername === 'sam');
-ok('alex has 1 + 7 = 8 entries', alex.totalEntries === 8, alex);
-ok('unmatched bonus listed', ents.json.unmatched.length === 1 && ents.json.unmatched[0].igUsername === 'newfan', ents.json.unmatched);
+// --- 5. People, overrides, dry run, exports --------------------------------------
+let people = await api('GET', `/giveaways/${gid}/people`);
+const find = (name: string) => people.json.find((p: any) => p.discord?.username === name || p.accounts.instagram === name);
+let alex = find('alex');
+let sam = find('sam');
+ok('alex: 1 base + 1 tagged comment + 1 story + 5 event stories = 8', alex.eligible && alex.entries.total === 8 && alex.entries.base === 1 && alex.entries.bonus === 7, alex);
+ok('breakdown has labels', alex.breakdown.length === 3 && alex.breakdown.every((b: any) => b.label), alex.breakdown);
+ok('sam: base entry only', sam.eligible && sam.entries.total === 1, sam);
+const newfan = find('newfan');
+ok('Instagram-only person listed, not eligible, missing the Discord entry', newfan && !newfan.eligible && newfan.discord === null && newfan.missing.some((m: string) => /Discord: entered/.test(m)), newfan);
 
-const manual = await api('POST', `/giveaways/${gid}/bonuses`, { entrantId: sam.id, label: 'Helped run the event' });
-ok('manual bonus added', manual.status === 201 && manual.json.label === 'Helped run the event', manual.json);
-const removed = await api('DELETE', `/giveaways/${gid}/bonuses/${manual.json.id}`, { reason: 'Test' });
-ok('manual bonus removed', removed.status === 200 && removed.json.revokedReason === 'Test', removed.json);
-ok('disqualify requires reason', (await api('POST', `/giveaways/${gid}/entrants/${sam.id}/disqualify`, {})).status === 400);
-ok('disqualify', (await api('POST', `/giveaways/${gid}/entrants/${sam.id}/disqualify`, { reason: 'Alt account' })).status === 200);
-ents = await api('GET', `/giveaways/${gid}/entrants`);
-ok('disqualified → 0 entries', ents.json.entrants.find((e: any) => e.id === sam.id).totalEntries === 0);
+const v1Ents = await api('GET', `/giveaways/${gid}/entrants`);
+ok('v1 /entrants still works', v1Ents.json.entrants.find((e: any) => e.discordUsername === 'alex').totalEntries === 8 && v1Ents.json.unmatched.length === 1, v1Ents.json);
+
+const manual = await api('POST', `/giveaways/${gid}/people/${sam.id}/overrides`, { kind: 'manual_entry', label: 'Helped run the event', weight: 2 });
+ok('manual entry added', manual.status === 201 && manual.json.label === 'Helped run the event', manual.json);
+people = await api('GET', `/giveaways/${gid}/people`);
+ok('sam: 1 + 2 manual = 3', find('sam').entries.total === 3 && find('sam').overrides.length === 1, find('sam'));
+const removed = await api('DELETE', `/giveaways/${gid}/overrides/${manual.json.id}`);
+ok('manual entry removed', removed.status === 200 && removed.json.revokedAt, removed.json);
+ok('v1 bonus endpoint maps to a manual entry', (await api('POST', `/giveaways/${gid}/bonuses`, { entrantId: sam.id, label: 'x' })).status === 201);
+const v1b = (await pool.query(`SELECT id FROM overrides WHERE giveaway_id=$1 AND revoked_at IS NULL`, [gid])).rows[0].id;
+ok('v1 bonus delete', (await api('DELETE', `/giveaways/${gid}/bonuses/${v1b}`)).status === 200);
+ok('disqualify requires reason', (await api('POST', `/giveaways/${gid}/people/${sam.id}/disqualify`, {})).status === 400);
+ok('disqualify', (await api('POST', `/giveaways/${gid}/people/${sam.id}/disqualify`, { reason: 'Alt account' })).status === 200);
+people = await api('GET', `/giveaways/${gid}/people`);
+ok('disqualified → 0 entries', find('sam').entries.total === 0 && find('sam').disqualified?.reason === 'Alt account', find('sam'));
 ok('restore', (await api('POST', `/giveaways/${gid}/entrants/${sam.id}/restore`)).status === 200);
+
+// Dry run: make the tagged comment required. Alex stays eligible (6 left: comment moves to base), sam drops out.
+const proposal = keepRules((await api('GET', `/giveaways/${gid}`)).json);
+proposal[1].rules = proposal[1].rules.map((r: any) => (r.action === 'comment' ? { ...r, type: 'required' } : r));
+const preview = await api('POST', `/giveaways/${gid}/preview`, { platforms: proposal });
+ok('preview: sam becomes ineligible, alex loses the comment bonus', preview.status === 200 && preview.json.becomeIneligible === 1 && preview.json.entriesBefore === 9 && preview.json.entriesAfter === 7, preview.json);
+ok('preview saved nothing', igRules((await api('GET', `/giveaways/${gid}`)).json).every((r: any) => r.type === 'bonus'));
+// Grandfather sam: count the would-be requirement as met... only works on required rules.
+const notRequired = await api('POST', `/giveaways/${gid}/people/${sam.id}/overrides`, { kind: 'requirement_met', ruleId: igRules(created.json)[1].id });
+ok('requirement override on a bonus rule → 400', notRequired.status === 400, notRequired.json);
 
 const entriesCsv = await api('GET', `/giveaways/${gid}/export/entries.csv`);
 const lines = entriesCsv.text.trim().split('\n');
 ok('entries.csv: header + 8 alex + 1 sam rows', lines.length === 1 + 8 + 1, lines);
 ok('entries.csv named after giveaway', /Test-Giveaway-entries\.csv/.test(entriesCsv.headers.get('content-disposition') ?? ''), entriesCsv.headers.get('content-disposition'));
 const entrantsCsv = await api('GET', `/giveaways/${gid}/export/entrants.csv`);
-ok('entrants.csv has form answer + rule columns', /What do you play on\?/.test(entrantsCsv.text) && /Story mention \(max 5/.test(entrantsCsv.text), entrantsCsv.text.split('\n')[0]);
+ok('entrants.csv has form answer + rule columns', /What do you play on\?/.test(entrantsCsv.text) && /max 5/.test(entrantsCsv.text), entrantsCsv.text.split('\n')[0]);
+const activityCsv = await api('GET', `/giveaways/${gid}/export/activity.csv`);
+ok('activity.csv: every recorded action', activityCsv.text.trim().split('\n').length === 1 + 2 /* enters */ + 2 + 7 + 1, activityCsv.text);
 const auditCsv = await api('GET', `/giveaways/${gid}/export/audit.csv`);
 ok('audit.csv records the admin email', /admin:tester@bostonblerds\.com/.test(auditCsv.text));
 
-ok('pick a winner while open → 409', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: alex.id })).status === 409);
+// Deleted comments stop counting; seen again, they count again.
+await svc.markMissingRemoved(gid, 'comment', new Set(['c1']), 'deleted');
+people = await api('GET', `/giveaways/${gid}/people`);
+ok('deleted comment → alex 7', find('alex').entries.total === 7, find('alex'));
+await record('comment', 'alex.plays', 'c2', { taggedFriend: true });
+people = await api('GET', `/giveaways/${gid}/people`);
+ok('comment seen again → alex 8', find('alex').entries.total === 8, find('alex'));
+
+ok('pick a winner while open → 409', (await api('POST', `/giveaways/${gid}/winners`, { personId: alex.id })).status === 409);
 const closed = await api('POST', `/giveaways/${gid}/close`);
 ok('close early → closed', closed.status === 200 && closed.json.status === 'closed', closed.json);
 
 // Winners (no Discord connection in tests, so nothing is posted or DMed).
-const pick = await api('POST', `/giveaways/${gid}/winners`, { entrantId: alex.id });
+const pick = await api('POST', `/giveaways/${gid}/winners`, { personId: alex.id });
 ok('manual pick → 201 pending', pick.status === 201 && pick.json.status === 'pending' && pick.json.entriesAtDraw === 8, pick.json);
 ok('second pick with 1 slot → 409', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: sam.id })).status === 409);
 ok('notify without Discord → 503', (await api('POST', `/giveaways/${gid}/winners/${pick.json.id}/notify`)).status === 503);
 const declined = await api('POST', `/giveaways/${gid}/winners/${pick.json.id}/outcome`, { outcome: 'declined' });
 ok('report declined → winner kept as declined', declined.status === 200 && declined.json.status === 'declined', declined.json);
-ents = await api('GET', `/giveaways/${gid}/entrants`);
-ok('declined winner is disqualified', ents.json.entrants.find((e: any) => e.id === alex.id).totalEntries === 0);
-ok('cannot pick a disqualified entrant', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: alex.id })).status === 400);
+people = await api('GET', `/giveaways/${gid}/people`);
+ok('declined winner is disqualified', find('alex').entries.total === 0);
+ok('cannot pick a disqualified person', (await api('POST', `/giveaways/${gid}/winners`, { personId: alex.id })).status === 400);
 const drawn = await api('POST', `/giveaways/${gid}/winners/draw`);
-ok('draw → the only eligible entrant (sam)', drawn.status === 201 && drawn.json.entrantId === sam.id, drawn.json);
+ok('draw → the only eligible person (sam)', drawn.status === 201 && drawn.json.entrantId === sam.id, drawn.json);
 const accepted = await api('POST', `/giveaways/${gid}/winners/${drawn.json.id}/outcome`, { outcome: 'accepted' });
 ok('report accepted', accepted.status === 200 && accepted.json.status === 'accepted', accepted.json);
 const history = await api('GET', `/giveaways/${gid}/winners`);
 ok('winner history: declined then accepted', history.json.map((w: any) => w.status).join(',') === 'declined,accepted' && history.json[1].entrant.discordUsername === 'sam', history.json);
 ok('draw with no slot left → 409', (await api('POST', `/giveaways/${gid}/winners/draw`)).status === 409);
-
 ok('no open giveaway after close', (await svc.getOpenGiveaway()) === null);
-ok('story after close earns nothing', (await award('ig_story', 'sam_ig', 'late1')) === 'no-rule');
 
-// Cap: a giveaway with max 2 participants closes itself on the 2nd entry.
+// Cap: a giveaway with max 2 participants closes itself on the 2nd entry. (v1 fields still accepted.)
 const capped = await api('POST', '/giveaways', {
-  name: 'Capped', startsAt: iso(now - 60e3), endsAt: iso(now + 60 * 60e3), maxParticipants: 2,
-  formFields: null, rules: null, entryChannel: null, igPost: null, reminderText: null,
+  name: 'Capped', startsAt: iso(now - 60e3), endsAt: iso(now + 60 * 60e3), maxParticipants: 2, entryChannel: 'capped',
+  formFields: null, rules: null, igPost: null, reminderText: null,
   announcements: null, testMode: null, winnerNotify: null, claimHours: null,
 });
+ok('v1 create (entryChannel only) → Discord enter + member required',
+  capped.status === 201 && capped.json.platforms.length === 1 && capped.json.platforms[0].rules.map((r: any) => `${r.action}:${r.type}`).join() === 'enter:required,member:required' && capped.json.entryMethods.join() === 'discord', capped.json);
 const winnerSettings = await api('POST', '/giveaways', {
   name: 'Winner Settings', startsAt: '2027-03-01T12:00:00-05:00', endsAt: '2027-03-02T12:00:00-05:00', testMode: true,
+  platforms: [{ platform: 'discord', settings: { channel: 'ws' }, rules: discordReq }],
   winnerCount: 2, winnerSelect: 'auto', winnerNotify: 'auto', notifyDelayMinutes: 1, winnerMessage: 'Hi {name}', claimHours: 3,
 });
 ok('create keeps winner settings', winnerSettings.status === 201 && winnerSettings.json.winnerCount === 2 && winnerSettings.json.winnerSelect === 'auto' && winnerSettings.json.notifyDelayMinutes === 1 && winnerSettings.json.winnerMessage === 'Hi {name}', winnerSettings.json);
-ok('create with nulls everywhere → 201 with defaults', capped.status === 201 && capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0, capped.json);
+ok('create with nulls → defaults', capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0 && capped.json.baseWeight === 1, capped.json);
 ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}?confirm=Capped`)).status === 409);
 const cg = await svc.getOpenGiveaway();
 await svc.submitEntry({ giveaway: cg, discordId: 'a', discordUsername: 'a', values: {} });
@@ -223,55 +267,91 @@ await svc.closeGiveaway(cg.id, 'tester', 'early');
 const earlyExtend = await svc.extendGiveaway(await svc.getGiveaway(cg.id), { hours: 2 }, 'tester');
 ok('extend a giveaway an admin closed early → refused', !earlyExtend.ok, earlyExtend);
 
-// Delete: closed giveaway with entrants needs ?confirm=<name>.
+// Delete: closed giveaway with people needs ?confirm=<name>.
 const noConfirm = await api('DELETE', `/giveaways/${gid}`);
-ok('delete without confirm → 400 requiresConfirm', noConfirm.status === 400 && noConfirm.json.requiresConfirm === true && noConfirm.json.entrants === 2, noConfirm.json);
+ok('delete without confirm → 400 requiresConfirm', noConfirm.status === 400 && noConfirm.json.requiresConfirm === true && noConfirm.json.entrants === 3, noConfirm.json);
 ok('delete with wrong confirm → 400', (await api('DELETE', `/giveaways/${gid}?confirm=nope`)).status === 400);
 const del = await api('DELETE', `/giveaways/${gid}?confirm=${encodeURIComponent('Test Giveaway')}`);
-ok('delete with confirm → 200', del.status === 200 && del.json.deleted === true && del.json.entrants === 2, del.json);
+ok('delete with confirm → 200', del.status === 200 && del.json.deleted === true, del.json);
 ok('deleted giveaway → 404', (await api('GET', `/giveaways/${gid}`)).status === 404);
 const leftovers = (await pool.query(
-  `SELECT (SELECT count(*) FROM entrants WHERE giveaway_id=$1) + (SELECT count(*) FROM bonuses WHERE giveaway_id=$1)
+  `SELECT (SELECT count(*) FROM entrants WHERE giveaway_id=$1) + (SELECT count(*) FROM activities WHERE giveaway_id=$1)
+        + (SELECT count(*) FROM overrides WHERE giveaway_id=$1) + (SELECT count(*) FROM winners WHERE giveaway_id=$1)
         + (SELECT count(*) FROM giveaway_rules WHERE giveaway_id=$1) + (SELECT count(*) FROM audit_log WHERE giveaway_id=$1) AS n`, [gid])).rows[0].n;
 ok('nothing left behind', Number(leftovers) === 0, leftovers);
 const summary = (await pool.query(`SELECT * FROM audit_log WHERE action='giveaway.deleted' AND details->>'id' = $1`, [String(gid)])).rows[0];
-ok('deletion summary kept in audit log', summary?.actor_id === 'admin:tester@bostonblerds.com' && summary.details.entrants === 2, summary);
+ok('deletion summary kept in audit log', summary?.actor_id === 'admin:tester@bostonblerds.com', summary);
 ok('GTA giveaway untouched', (await api('GET', '/giveaways/1')).status === 200);
 
-// ----- Instagram entry method
+// ----- Instagram only: first required rule enters; bonuses add entries.
 const igOnly = await api('POST', '/giveaways', {
-  name: 'IG Only', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethods: ['instagram'],
-  rules: [{ action: 'ig_comment', maxCount: 1 }, { action: 'ig_tag', maxCount: 1, options: { captionIncludes: '#bbtest' } }],
+  name: 'IG Only', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
+  platforms: [{ platform: 'instagram', rules: [
+    { action: 'comment', type: 'required' },
+    { action: 'tag', type: 'bonus', weight: 3, options: { captionIncludes: '#bbtest' } },
+  ] }],
 });
-ok('instagram-entry giveaway created (no form needed)', igOnly.status === 201 && igOnly.json.entryMethods.join() === 'instagram', igOnly.json);
-ok('instagram-entry without IG rules → 400', (await api('PATCH', `/giveaways/${igOnly.json.id}`, { rules: [] })).status === 400);
+ok('instagram-only giveaway created (no form needed)', igOnly.status === 201 && igOnly.json.formFields.length === 0, igOnly.json);
 const igG = await svc.getOpenGiveaway();
-const igAward = (action: string, ig: string, ref: string, extra: Record<string, unknown> = {}) =>
-  svc.awardAction({ giveaway: igG, action, igUsername: ig, at: new Date(), sourceRef: ref, source: 'ig_webhook', ...extra });
-ok('first comment enters an Instagram-only person', (await igAward('ig_comment', 'fan_one', 'igc1')) === 'awarded');
-ok('tagged post without the caption text → no entry', (await igAward('ig_tag', 'fan_one', 'igt1', { caption: 'hi' })) === 'no-rule');
-ok('tagged post with the caption text → entry', (await igAward('ig_tag', 'fan_one', 'igt2', { caption: 'entering #BBTest!' })) === 'awarded');
+const igRec = (action: string, ig: string, ref: string, details: Record<string, unknown> = {}) =>
+  svc.recordInstagramActivity({ giveaway: igG, action, igUsername: ig, at: new Date(), sourceRef: ref, details });
+await igRec('comment', 'fan_one', 'igc1');
+await igRec('tag', 'fan_one', 'igt1', { caption: 'hi' });
+await igRec('tag', 'fan_one', 'igt2', { caption: 'entering #BBTest!' });
+await igRec('tag', 'lurker', 'igt3', { caption: '#bbtest' });
 ok('Discord entries refused in instagram-only giveaways', (await svc.submitEntry({ giveaway: igG, discordId: 'dz', discordUsername: 'z', values: {} })).status === 'closed');
-let igEnts = await api('GET', `/giveaways/${igOnly.json.id}/entrants`);
-const fan = igEnts.json.entrants.find((e: any) => e.igUsername === 'fan_one');
-ok('instagram-only entrant: no Discord, entries = actions (2)', fan && fan.discordId === null && fan.totalEntries === 2 && fan.inServer === null, igEnts.json);
+const igPeople = (await api('GET', `/giveaways/${igOnly.json.id}/people`)).json;
+const fan = igPeople.find((p: any) => p.accounts.instagram === 'fan_one');
+ok('fan: base 1 + tag ×3 = 4 (tag without the caption text ignored)', fan?.eligible && fan.discord === null && fan.entries.total === 4, fan);
+const lurker = igPeople.find((p: any) => p.accounts.instagram === 'lurker');
+ok('tag without the required comment → not eligible', lurker && !lurker.eligible && lurker.entries.total === 0, lurker);
 await api('POST', `/giveaways/${igOnly.json.id}/close`);
 
-// "Either": Instagram first, then Discord with the same IG username → one linked entrant.
+// ----- No required rules: any counted action qualifies (OR). Instagram first, then Discord → one linked person.
 const either = await api('POST', '/giveaways', {
-  name: 'Either Way', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), entryMethods: ['discord', 'instagram'],
-  formFields: [{ id: 'ig', label: 'Instagram username', type: 'ig_username', required: true }],
-  rules: [{ action: 'ig_story', maxCount: 1 }],
+  name: 'Either Way', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
+  platforms: [
+    { platform: 'discord', settings: { channel: 'either' }, rules: [{ action: 'enter', type: 'bonus' }] },
+    { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] },
+  ],
 });
-ok('discord + instagram giveaway created', either.status === 201 && either.json.entryMethods.join() === 'discord,instagram', either.json);
-ok('no entry methods → 400', (await api('PATCH', `/giveaways/${either.json.id}`, { entryMethods: [] })).status === 400);
+ok('either giveaway created, IG field auto-added', either.status === 201 && either.json.formFields[0]?.locked === true, either.json);
 const eg = await svc.getOpenGiveaway();
-await svc.awardAction({ giveaway: eg, action: 'ig_story', igUsername: 'both_ways', at: new Date(), sourceRef: 's-both', source: 'ig_webhook' });
+await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'both_ways', at: new Date(), sourceRef: 'c-both' });
+await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'ig_only', at: new Date(), sourceRef: 'c-ig' });
 const linked = await svc.submitEntry({ giveaway: eg, discordId: 'd-both', discordUsername: 'bothways', values: { ig: 'both_ways' } });
-ok('Discord entry links to the Instagram entrant', linked.status !== 'conflict' && linked.entrant?.discordId === 'd-both', linked);
-const eEnts = await api('GET', `/giveaways/${either.json.id}/entrants`);
-ok('linked entrant: 1 base + 1 story = 2 entries, one row', eEnts.json.entrants.length === 1 && eEnts.json.entrants[0].totalEntries === 2, eEnts.json);
+ok('Discord entry links to the Instagram person', linked.status !== 'conflict' && linked.entrant?.discordId === 'd-both', linked);
+const ePeople = (await api('GET', `/giveaways/${either.json.id}/people`)).json;
+const both = ePeople.find((p: any) => p.accounts.instagram === 'both_ways');
+ok('linked person: one row, 1 base + enter + comment = 3', ePeople.length === 2 && both.discord?.id === 'd-both' && both.entries.total === 3, ePeople);
+ok('Instagram-only person qualifies too: 1 base + comment = 2', ePeople.find((p: any) => p.accounts.instagram === 'ig_only')?.entries.total === 2, ePeople);
 await api('POST', `/giveaways/${either.json.id}/close`);
+
+// ----- Winner checks: "follows @BostonBlerds" is confirmed for winners before they're contacted.
+const follow = await api('POST', '/giveaways', {
+  name: 'Follow Check', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3), winnerCount: 2,
+  platforms: [
+    { platform: 'discord', settings: { channel: 'follow' }, rules: discordReq },
+    { platform: 'instagram', rules: [{ action: 'follow', type: 'required' }] },
+  ],
+});
+const followRule = follow.json.platforms[1].rules[0];
+ok('follow rule defaults to check: winners', follow.status === 201 && followRule.check === 'winners', follow.json);
+const fg = await svc.getOpenGiveaway();
+await svc.submitEntry({ giveaway: fg, discordId: 'f1', discordUsername: 'f1', values: { ig: 'f1_ig' } });
+await svc.submitEntry({ giveaway: fg, discordId: 'f2', discordUsername: 'f2', values: { ig: 'f2_ig' } });
+const fPeople = (await api('GET', `/giveaways/${follow.json.id}/people`)).json;
+ok('eligible before the check, with the check listed', fPeople.every((p: any) => p.eligible && p.winnerChecks.length === 1), fPeople);
+await api('POST', `/giveaways/${follow.json.id}/close`);
+const f1 = fPeople.find((p: any) => p.discord.id === 'f1');
+const f2 = fPeople.find((p: any) => p.discord.id === 'f2');
+const w1 = await api('POST', `/giveaways/${follow.json.id}/winners`, { personId: f1.id });
+ok('winner with a check → status checking', w1.status === 201 && w1.json.status === 'checking' && w1.json.checks.length === 1, w1.json);
+const conf = await api('POST', `/giveaways/${follow.json.id}/winners/${w1.json.id}/checks/${followRule.id}`, { confirmed: true });
+ok('check confirmed → pending (ready to notify)', conf.status === 200 && conf.json.status === 'pending' && conf.json.checks[0].confirmed === true, conf.json);
+const w2 = await api('POST', `/giveaways/${follow.json.id}/winners`, { personId: f2.id });
+const rej = await api('POST', `/giveaways/${follow.json.id}/winners/${w2.json.id}/checks/${followRule.id}`, { confirmed: false });
+ok('check rejected → declined', rej.status === 200 && rej.json.status === 'declined', rej.json);
 
 srv.close();
 await pool.end();

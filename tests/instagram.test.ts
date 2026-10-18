@@ -7,7 +7,7 @@ process.env.SERVER_ID ??= 'x';
 process.env.DATABASE_URL ??= 'postgresql://x@localhost:1/x';
 
 const { parseShortcode, toComment } = await import('../src/instagram/api.js');
-const { commentsToRevoke, tagsAFriend } = await import('../src/instagram/comments.js');
+const { tagsAFriend } = await import('../src/instagram/comments.js');
 
 test('parseShortcode: post, reel, share params, profile-style links', () => {
   assert.equal(parseShortcode('https://www.instagram.com/p/DeU57Lun84l/'), 'DeU57Lun84l');
@@ -15,16 +15,6 @@ test('parseShortcode: post, reel, share params, profile-style links', () => {
   assert.equal(parseShortcode('instagram.com/bostonblerds/p/Deh5vQnH9kZ'), 'Deh5vQnH9kZ');
   assert.equal(parseShortcode('https://www.instagram.com/bostonblerds/'), null);
   assert.equal(parseShortcode('not a link'), null);
-});
-
-test('commentsToRevoke: counted comments no longer visible lose their entry', () => {
-  const counted = [
-    { id: 1, sourceRef: 'c1' },
-    { id: 2, sourceRef: 'c2' },
-    { id: 3, sourceRef: null },
-  ];
-  assert.deepEqual(commentsToRevoke(counted, new Set(['c1'])).map(b => b.id), [2]);
-  assert.deepEqual(commentsToRevoke(counted, new Set(['c1', 'c2'])), []);
 });
 
 test('tagsAFriend: needs someone other than BB or the commenter', () => {
