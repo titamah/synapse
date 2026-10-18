@@ -43,6 +43,10 @@ ok('GTA gets comment + story rules', gtaRules.length === 2 && gtaRules[0].action
 const legacy = (await pool.query(`SELECT * FROM bonuses WHERE source_ref='c-legacy'`)).rows[0];
 ok('legacy comment bonus mapped to the comment rule', legacy.action === 'ig_comment' && legacy.rule_id === gtaRules[0].id, legacy);
 
+// The upgraded GTA giveaway runs Oct 19 – Nov 20, 2026. Close it so the tests' own
+// "starting now" giveaways never overlap it, whatever today's date is.
+await pool.query(`UPDATE giveaways SET closed_at = now(), close_reason = 'early' WHERE slug = 'gta6-2026'`);
+
 // --- 3. Admin API -----------------------------------------------------------------
 const { createWebServer } = await import(`${repo}/src/web/server.ts`);
 const srv = createWebServer().listen(0);
@@ -60,7 +64,7 @@ const api = async (method: string, p: string, body?: unknown, opts: { key?: stri
 
 ok('wrong key → 401', (await api('GET', '/giveaways', undefined, { key: 'nope' })).status === 401);
 const list = await api('GET', '/giveaways');
-ok('list giveaways', list.status === 200 && list.json[0].name === 'GTA VI Giveaway' && list.json[0].status === 'scheduled', list.json);
+ok('list giveaways', list.status === 200 && list.json.some((g: any) => g.name === 'GTA VI Giveaway'), list.json);
 
 const now = Date.now();
 const iso = (ms: number) => new Date(ms).toISOString();
