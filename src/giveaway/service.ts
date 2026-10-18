@@ -216,7 +216,7 @@ export type EntryResult =
   | { status: 'closed' | 'full' }
   | { status: 'invalid'; field: FormField }
   | { status: 'revoked'; entrant: Entrant }
-  | { status: 'conflict'; igUsername: string }
+  | { status: 'conflict'; igUsername: string; claimedBy: string | null }
   | { status: 'created' | 'updated' | 'unchanged'; entrant: Entrant };
 
 /**
@@ -270,7 +270,7 @@ export async function submitEntry(input: {
         claimedByDiscordId: owner.discordId,
         attemptedByUsername: input.discordUsername,
       });
-      return { status: 'conflict', igUsername };
+      return { status: 'conflict', igUsername, claimedBy: owner.discordId };
     }
   }
 
@@ -305,7 +305,7 @@ export async function submitEntry(input: {
     }
   } catch (err) {
     // Lost a race with someone claiming the same IG username.
-    if ((err as { code?: string }).code === '23505') return { status: 'conflict', igUsername: igUsername ?? '' };
+    if ((err as { code?: string }).code === '23505') return { status: 'conflict', igUsername: igUsername ?? '', claimedBy: (igUsername && (await getEntrantByIg(g.id, igUsername))?.discordId) || null };
     throw err;
   }
 

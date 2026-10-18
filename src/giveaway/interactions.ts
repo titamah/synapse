@@ -11,6 +11,7 @@ import {
 import type { FormField } from '../db/schema.js';
 import { channelName } from '../discord/channels.js';
 import { discordChannel, getEntrantByDiscord, getGiveaway, getOpenGiveaway, isInstagramField, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
+import { announceConflict } from './announcements.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 const MODAL_PREFIX = 'giveaway:enter:';
@@ -111,6 +112,11 @@ export async function handleGiveawayModal(interaction: ModalSubmitInteraction) {
     discordUsername: interaction.user.username,
     values,
   });
+  if (result.status === 'conflict' && result.igUsername) {
+    void announceConflict(interaction.client, g, { igUsername: result.igUsername, claimedBy: result.claimedBy, attemptedBy: interaction.user.id }).catch(err =>
+      console.error('Conflict alert failed:', err),
+    );
+  }
 
   await interaction.editReply(entryReply(g, result));
 }

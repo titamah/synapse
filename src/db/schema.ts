@@ -76,9 +76,23 @@ export const giveaways = pgTable('giveaways', {
   notifyDelayMinutes: integer('notify_delay_minutes').notNull().default(30),
   winnerMessage: text('winner_message'),
   claimHours: integer('claim_hours').notNull().default(12),
+  // Numbers kept after personal data is deleted (see GiveawayStats). Refreshed until then.
+  stats: jsonb('stats').$type<GiveawayStats>(),
+  // Set when people, activity and per-person audit were deleted (90 days after the end).
+  personalDataDeletedAt: timestamp('personal_data_deleted_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Snapshot of a giveaway's numbers; survives the 90-day deletion of personal data. */
+export type GiveawayStats = {
+  takenAt: string;
+  entrants: number;
+  eligible: number;
+  entries: number;
+  byRule: { ruleId: number; description: string; people: number; actions: number; entries: number }[];
+  byPlatform: Partial<Record<Platform, number>>;
+};
 
 /** Actions per platform. follow is manual (an admin confirms it); the rest are detected. */
 export const ACTIONS = {
@@ -164,7 +178,10 @@ export const winners = pgTable(
   {
     id: serial('id').primaryKey(),
     giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
-    entrantId: integer('entrant_id').notNull().references(() => entrants.id, { onDelete: 'cascade' }),
+    // null once personal data is deleted; `person` keeps who won (for 1 year, then anonymized).
+    entrantId: integer('entrant_id').references(() => entrants.id, { onDelete: 'set null' }),
+    person: jsonb('person').$type<{ discordId: string | null; discordUsername: string | null; igUsername: string | null }>(),
+    anonymizedAt: timestamp('anonymized_at', { withTimezone: true }),
     status: text('status').$type<WinnerStatus>().notNull().default('pending'),
     selectedBy: text('selected_by').notNull(),
     entriesAtDraw: integer('entries_at_draw').notNull(),

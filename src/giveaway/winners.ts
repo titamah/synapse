@@ -36,7 +36,7 @@ export async function getWinner(id: number) {
 }
 
 async function entrantFor(w: Winner): Promise<Entrant> {
-  return (await db.query.entrants.findFirst({ where: (e, { eq: eq_ }) => eq_(e.id, w.entrantId) }))!;
+  return (await db.query.entrants.findFirst({ where: (e, { eq: eq_ }) => eq_(e.id, w.entrantId!) }))!;
 }
 
 /** Who can still win: eligible (every requirement met, per the rules), never picked before. Weighted by entries. */
@@ -106,7 +106,7 @@ export async function selectWinner(client: Client | undefined, g: Giveaway, pers
   const checks = person.result.winnerChecks.map(ruleId => ({ ruleId, label: ruleLabel(rules.find(r => r.id === ruleId)!), confirmed: null }));
   const [w] = await db
     .insert(winners)
-    .values({ giveawayId: g.id, entrantId: person.id, selectedBy, entriesAtDraw: entries, checks, status: checks.length ? 'checking' : 'pending', notifyAt: checks.length ? null : notifyTime(g) })
+    .values({ giveawayId: g.id, entrantId: person.id, person: { discordId: person.discordId, discordUsername: person.discordUsername, igUsername: person.igUsername }, selectedBy, entriesAtDraw: entries, checks, status: checks.length ? 'checking' : 'pending', notifyAt: checks.length ? null : notifyTime(g) })
     .onConflictDoNothing()
     .returning();
   if (!w) return null;

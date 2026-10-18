@@ -16,6 +16,7 @@ import { isAdmin } from './lib/permissions.js';
 import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
 import { runScheduledSyncs } from './instagram/sync.js';
+import { runRetention } from './giveaway/retention.js';
 import { renewTokenIfDue } from './instagram/token.js';
 import { processPendingInstagramEvents } from './instagram/webhook.js';
 
@@ -128,10 +129,17 @@ if (env.IG_ACCESS_TOKEN) {
   instagramJob = setInterval(runInstagramJob, INSTAGRAM_JOB_MS);
 }
 
+// Hourly: stats snapshots, the 7-day heads-up and the 90-day deletion of personal data.
+const RETENTION_JOB_MS = 60 * 60 * 1000;
+const runRetentionJob = () => void runRetention(client).catch(err => console.error('Retention job failed:', err));
+const retentionJob = setInterval(runRetentionJob, RETENTION_JOB_MS);
+setTimeout(runRetentionJob, 60 * 1000);
+
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
   clearInterval(instagramJob);
   clearInterval(minuteJob);
+  clearInterval(retentionJob);
   webServer.close();
   await client.destroy();
   await pool.end();

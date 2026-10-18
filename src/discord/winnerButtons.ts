@@ -48,7 +48,7 @@ export async function handleWinnerButton(interaction: ButtonInteraction) {
   }
 
   // ----- Winner buttons (their DM)
-  const entrant = await db.query.entrants.findFirst({ where: (e, { eq }) => eq(e.id, w.entrantId) });
+  const entrant = await db.query.entrants.findFirst({ where: (e, { eq }) => eq(e.id, w.entrantId!) });
   if (entrant?.discordId !== interaction.user.id) {
     await interaction.reply({ content: "This prize isn't yours to claim.", flags: ephemeral });
     return;

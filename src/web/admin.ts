@@ -16,6 +16,7 @@ import { announceExtended } from '../giveaway/announcements.js';
 import { resolveAnnouncements } from '../giveaway/announcementRules.js';
 import type { EngineRule } from '../giveaway/engine.js';
 import { describeRule, ruleLabel } from '../giveaway/labels.js';
+import { deletesAt, saveStats } from '../giveaway/retention.js';
 import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
 import { confirmWinnerCheck, drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
 import {
@@ -307,6 +308,12 @@ async function giveawayJson(g: Giveaway, client?: Client) {
     eligibleCount: eligible.length,
     entryCount: eligible.reduce((s, p) => s + p.result.entries.total, 0),
     igSync: sync,
+    // Snapshot of the numbers (kept after personal data is deleted). null until the giveaway closes.
+    stats: g.stats,
+    // People, activity and entries are deleted 90 days after the end; the dashboard shows
+    // "removed per privacy policy" once personalDataDeletedAt is set.
+    personalDataDeletesAt: statusOf(g) === 'closed' ? deletesAt(g) : null,
+    personalDataDeletedAt: g.personalDataDeletedAt,
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     // ----- v1 mirrors (deprecated): for dashboards not yet on v2.
@@ -602,7 +609,7 @@ export function createAdminRouter(client?: Client) {
   router.post('/giveaways/:id/close', requireActor, async (req: Req, res) => {
     const closed = await closeGiveaway(req.giveaway!.id, req.actor!, 'early');
     if (!closed) return void res.status(409).json({ error: 'Already closed' });
-    inBackground(runFinalSync(closed));
+    inBackground(runFinalSync(closed).then(() => saveStats(closed)));
     res.json(await giveawayJson(closed, client));
   });
 
@@ -756,7 +763,13 @@ export function createAdminRouter(client?: Client) {
     const g = req.giveaway!;
     const people = await computePeople(g, client);
     const byId = new Map(people.map(p => [p.id, p]));
-    res.json((await listWinners(g.id)).map(w => ({ ...w, entrant: byId.get(w.entrantId) ? { ...byId.get(w.entrantId)!, activities: undefined } : null })));
+    res.json(
+      (await listWinners(g.id)).map(w => {
+        const p = w.entrantId ? byId.get(w.entrantId) : undefined;
+        // After personal data is deleted, `person` (who won) is all that's left; null once anonymized.
+        return { ...w, entrant: p ? { ...p, activities: undefined } : null };
+      }),
+    );
   });
 
   /** Checks shared by picking and drawing: the giveaway is closed and a winner slot is open. */

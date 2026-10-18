@@ -353,6 +353,27 @@ const w2 = await api('POST', `/giveaways/${follow.json.id}/winners`, { personId:
 const rej = await api('POST', `/giveaways/${follow.json.id}/winners/${w2.json.id}/checks/${followRule.id}`, { confirmed: false });
 ok('check rejected → declined', rej.status === 200 && rej.json.status === 'declined', rej.json);
 
+// ----- Retention: 90 days after the end, personal data goes; setup, stats and winners stay.
+const ret = await import(`${repo}/src/giveaway/retention.ts`);
+const fid = follow.json.id;
+const before = await api('GET', `/giveaways/${fid}`);
+ok('closed giveaway shows when personal data will be deleted', !!before.json.personalDataDeletesAt && before.json.personalDataDeletedAt === null, before.json);
+await ret.runRetention(undefined, new Date(Date.now() + 80 * 864e5));
+const early = await api('GET', `/giveaways/${fid}`);
+ok('before 90 days: stats snapshot taken, people kept', early.json.stats?.entrants === 2 && early.json.stats.byRule.length === 3 && (await api('GET', `/giveaways/${fid}/people`)).json.length === 2, early.json.stats);
+await ret.runRetention(undefined, new Date(Date.now() + 91 * 864e5));
+const after = await api('GET', `/giveaways/${fid}`);
+ok('after 90 days: personal data deleted, setup + stats kept', !!after.json.personalDataDeletedAt && after.json.stats?.eligible === 1 && after.json.platforms.length === 2, after.json);
+ok('after 90 days: no people', (await api('GET', `/giveaways/${fid}/people`)).json.length === 0);
+const left = (await pool.query(`SELECT (SELECT count(*) FROM entrants WHERE giveaway_id=$1) + (SELECT count(*) FROM activities WHERE giveaway_id=$1) + (SELECT count(*) FROM audit_log WHERE giveaway_id=$1 AND action LIKE 'entry.%') AS n`, [fid])).rows[0].n;
+ok('after 90 days: entrants, activity, per-person audit gone', Number(left) === 0, left);
+const kept = (await api('GET', `/giveaways/${fid}/winners`)).json;
+ok('after 90 days: winners keep who won', kept.length === 2 && kept[0].entrantId === null && kept[0].person?.discordId === 'f1', kept);
+ok('admin history kept', (await api('GET', `/giveaways/${fid}/audit`)).json.some((a: any) => a.action === 'giveaway.personal_data_deleted'));
+await ret.runRetention(undefined, new Date(Date.now() + 366 * 864e5));
+const anon = (await api('GET', `/giveaways/${fid}/winners`)).json;
+ok('after a year: winners anonymized', anon.every((w: any) => w.person === null && w.anonymizedAt), anon);
+
 srv.close();
 await pool.end();
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');

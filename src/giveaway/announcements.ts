@@ -130,6 +130,20 @@ export async function announceExtended(client: Client | undefined, g: Giveaway, 
   await postOnce(client, g, key, { embeds: [extendedEmbed(g, change)] });
 }
 
+/**
+ * Two Discord accounts claimed the same Instagram username: flag it for a human (once per pair).
+ * The second person was told to contact an admin; the first keeps their entry.
+ */
+export async function announceConflict(client: Client, g: Giveaway, c: { igUsername: string; claimedBy: string | null; attemptedBy: string }) {
+  const owner = c.claimedBy ? `<@${c.claimedBy}>` : 'another entrant';
+  await postOnce(client, g, `conflict:${c.igUsername}:${c.attemptedBy}`, {
+    content:
+      `⚠️ **Username conflict in ${g.name}:** <@${c.attemptedBy}> tried to enter with Instagram **@${c.igUsername}**, ` +
+      `already used by ${owner}. Their entry wasn't saved. Check who owns the account; to fix it, disqualify the wrong person from the dashboard.`,
+    allowedMentions: { parse: [] },
+  });
+}
+
 /** /admin giveaway timer: a live countdown posted to #community-updates on demand. */
 export async function postTimer(client: Client, g: Giveaway) {
   const channel = await adminChannel(client);

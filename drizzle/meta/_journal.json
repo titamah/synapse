@@ -99,6 +99,13 @@
       "when": 1792364810753,
       "tag": "0013_drop_v1_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792365508389,
+      "tag": "0014_retention",
+      "breakpoints": true
     }
   ]
 }
