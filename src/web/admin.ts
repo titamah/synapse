@@ -8,6 +8,7 @@ import { db } from '../db/client.js';
 import { ENTRY_METHODS, giveawayRules, giveaways, type EntryMethod } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
 import { serverMemberIds } from '../discord/members.js';
+import { channelName } from '../discord/channels.js';
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
 import { hasTagRules } from '../instagram/tags.js';
@@ -76,7 +77,8 @@ const giveawayFields = {
   // One or more: discord = /giveaway enter; instagram = your first counted Instagram action enters you.
   entryMethods: unset(z.array(z.enum(ENTRY_METHODS)).min(1, 'pick at least one way to enter').max(ENTRY_METHODS.length)).transform(v => (v ? [...new Set(v)] : v)),
   // null = clear the setting
-  entryChannel: z.string().max(100).nullish(),
+  // Channel NAME; a leading # and capitals are fine ("#GTA-Giveaway" is saved as "gta-giveaway").
+  entryChannel: z.string().max(100).nullish().transform(v => (typeof v === 'string' ? channelName(v) || null : v)),
   // The giveaway's Instagram post: a link (instagram.com/p/…) or media ID. Can be set any time,
   // even after the giveaway starts; comments are counted from startsAt. null = clear.
   igPost: z.string().min(1).max(500).nullish(),

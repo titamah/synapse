@@ -9,7 +9,7 @@ import {
 import { GIVEAWAY_FOOTER } from '../giveaway/embeds.js';
 import { getGiveaway } from '../giveaway/service.js';
 import { isAdmin } from '../lib/permissions.js';
-import { textChannelByName } from './channels.js';
+import { channelName, textChannelByName } from './channels.js';
 
 export const POST_TO_CHANNEL = 'Post to giveaway channel';
 
@@ -38,7 +38,7 @@ export async function handlePostToChannel(interaction: MessageContextMenuCommand
   }
   const channel = await textChannelByName(interaction.client, g.entryChannel);
   if (!channel) {
-    await interaction.reply({ content: `Couldn't find #${g.entryChannel}.`, flags: ephemeral });
+    await interaction.reply({ content: `Couldn't find #${channelName(g.entryChannel)}.`, flags: ephemeral });
     return;
   }
   const posted = await channel.send({ embeds: message.embeds.map(e => EmbedBuilder.from(e)) });

@@ -9,6 +9,7 @@ import {
   TextInputStyle,
 } from 'discord.js';
 import type { FormField } from '../db/schema.js';
+import { channelName } from '../discord/channels.js';
 import { getEntrantByDiscord, getGiveaway, getOpenGiveaway, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
 
 const ephemeral = MessageFlags.Ephemeral;
@@ -56,9 +57,10 @@ export async function showEntryModal(interaction: ChatInputCommandInteraction) {
   }
 
   const channel = interaction.channel;
-  if (g.entryChannel && (!channel || !('name' in channel) || channel.name !== g.entryChannel)) {
-    const target = interaction.guild?.channels.cache.find(c => c.name === g.entryChannel);
-    await interaction.reply({ content: `Head over to ${target ? `<#${target.id}>` : `#${g.entryChannel}`} to enter!`, flags: ephemeral });
+  const wanted = g.entryChannel ? channelName(g.entryChannel) : null;
+  if (wanted && (!channel || !('name' in channel) || channel.name !== wanted)) {
+    const target = interaction.guild?.channels.cache.find(c => c.name === wanted);
+    await interaction.reply({ content: `Head over to ${target ? `<#${target.id}>` : `#${wanted}`} to enter!`, flags: ephemeral });
     return;
   }
 

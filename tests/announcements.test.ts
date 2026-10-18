@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+process.env.DISCORD_TOKEN ??= 'x';
+process.env.CLIENT_ID ??= 'x';
+process.env.SERVER_ID ??= 'x';
+process.env.DATABASE_URL ??= 'postgresql://x@localhost:1/x';
+const { channelName } = await import('../src/discord/channels.js');
 import { crossedCapacity, crossedCountdowns, formatDuration, reachedMilestone, resolveAnnouncements } from '../src/giveaway/announcementRules.js';
 
 const H = 3_600_000;
@@ -35,4 +40,10 @@ test('formatDuration', () => {
   assert.equal(formatDuration(24), '24 hours');
   assert.equal(formatDuration(1), '1 hour');
   assert.equal(formatDuration(0.5), '30 minutes');
+});
+
+test('channelName: # and capitals are normalized', () => {
+  assert.equal(channelName('#gta-giveaway'), 'gta-giveaway');
+  assert.equal(channelName(' #GTA-Giveaway '), 'gta-giveaway');
+  assert.equal(channelName('gta-giveaway'), 'gta-giveaway');
 });
