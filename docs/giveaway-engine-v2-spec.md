@@ -1,6 +1,6 @@
 # Giveaway Engine v2: Platforms, Requirements & Activity
 
-**Status:** Draft v1 · **Owner:** Boston Blerds · **Replaces:** `entryMethods` and the flat `rules` list in v1
+**Status:** Draft v2 · **Owner:** Boston Blerds · **Replaces:** `entryMethods` and the flat `rules` list in v1
 
 A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: you must enter on Discord and follow us; comments and Stories are bonuses."*
 
@@ -15,13 +15,14 @@ A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: y
   "name": "GTA VI Giveaway",
   "startsAt": "2026-10-19T16:00:00-04:00",
   "endsAt":   "2026-11-20T22:30:00-05:00",
-  "baseWeight": 1,                                   // entries for being eligible
+  "baseWeight": 1,                                   // "qualifying is worth N entries" (see §3 for why it's not per rule)
   "platforms": [
     {
       "platform": "discord",
-      "settings": { "channel": "gta-giveaway" },
+      "settings": { "channel": "gta-giveaway" },    // null when no rule needs a channel (e.g. member-only)
       "rules": [
-        { "action": "enter", "type": "required" }    // /giveaway enter + the entry form
+        { "action": "enter",  "type": "required" },  // /giveaway enter + the entry form
+        { "action": "member", "type": "required" }   // still in the server when entries are counted
       ]
     },
     {
@@ -64,24 +65,27 @@ A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: y
 
 | Platform | Settings | Actions |
 |---|---|---|
-| **Discord** | `channel` (where `/giveaway enter` works) | `enter` (auto). *Later:* `member` (auto-enter every member) |
+| **Discord** | `channel` (where `/giveaway enter` works; **null** when no rule needs it) | `enter` (auto) · `member` (auto: in the server when entries are counted). *Later:* auto-enter every member without them doing anything |
 | **Instagram** | `posts[]`, `autoIncludeHashtag` | `follow` (**manual**) · `comment` · `story` · `tag` (someone's post that tags us; must tag us, `captionIncludes` can require a hashtag) |
 | *Later: Posh, TikTok* | — | e.g. Posh `attend` (ticket scanned) |
 
 - **Manual vs. automatic is a property of the action** (follow = manual; the rest = auto). The dashboard never asks.
-- **Selecting a platform** unlocks its settings and actions. Discord `enter` is what makes the entry form and `/giveaway enter` exist.
+- **Selecting a platform** unlocks its settings and actions. Discord `enter` is what makes the entry form, the channel setting and `/giveaway enter` exist. A Discord platform with only `member` has no form, command or channel.
+- The dashboard **pre-selects `member`** (required) when Discord is added; it can be removed.
 - Every selected platform needs **at least 1 rule**.
 
 ---
 
 ## 3. Eligibility and entries
 
-**Eligible** = every **required** rule on every selected platform is met (**AND**), **plus** not disqualified, **plus** still in the Discord server (when Discord is a platform).
+**Eligible** = every **required** rule on every selected platform is met (**AND**), **plus** not disqualified.
+- There's no hidden "still in the server" check: that's the Discord **`member`** rule. It's evaluated whenever entries are counted (dashboard, export, draw), so someone who leaves becomes ineligible from then on. Giveaways that don't require `member` keep counting people who left.
 - If a giveaway has **no required rules at all**, any counted action makes you eligible (that's how **OR** giveaways work).
 - **Manual rules with `check: "winners"`** don't block eligibility; they're confirmed in the winner flow (§6). `check: "everyone"` is ticked per person in the dashboard.
 - **Not supported (decided):** "this AND (that OR that)". Can be added later as an optional platform grouping without changing existing giveaways.
 
 **Entries** = `baseWeight` (if eligible) + Σ (counted bonus actions × that rule's `weight`).
+- **Why one base weight, not a weight per required rule:** the base entry is earned by meeting *all* requirements together; partial completion is worth nothing. Per-rule weights would make the base "the sum of required weights," so adding a requirement would silently change everyone's base, and manual winners-only rules (confirmed for one person) couldn't contribute. The dashboard shows it as "Qualifying is worth **N** entries."
 - **An action used to meet a requirement is part of the base entry and does not also earn a bonus.** Only additional actions earn bonuses. *Example:* required = comment with a tag, bonus = any comment → 1st tagged comment = base; every comment after that = bonus.
 - Bonus counting uses the v1 rule engine: the most specific window with room wins, then list order.
 
@@ -178,7 +182,9 @@ Discord updates (toggles, Extend, Post to giveaway channel), `/admin giveaway ti
 | `entryChannel` | Discord `settings.channel` |
 | Entrants + bonuses | People + activity log (entries derived) |
 
-**GTA #1 after migration:** Discord `enter` required · Instagram: `follow` required (winners) is **added**, the comment, Story and event-Story bonuses carry over · form unchanged.
+**GTA #1 after migration:** Discord `enter` + `member` required · Instagram: `follow` required (winners) is **added**, the comment, Story and event-Story bonuses carry over · form unchanged.
+
+Every migrated Discord giveaway gets `member` required, matching v1's implicit "still in the server" check.
 
 The API keeps accepting v1 fields for a transition period and translates them, so the dashboard can switch over gradually.
 
