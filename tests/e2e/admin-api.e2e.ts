@@ -222,7 +222,7 @@ ok('close early → closed', closed.status === 200 && closed.json.status === 'cl
 
 // Winners (no Discord connection in tests, so nothing is posted or DMed).
 const pick = await api('POST', `/giveaways/${gid}/winners`, { personId: alex.id });
-ok('manual pick → 201 pending', pick.status === 201 && pick.json.status === 'pending' && pick.json.entriesAtDraw === 8, pick.json);
+ok('manual pick → 201 pending', pick.status === 201 && pick.json.status === 'pending' && pick.json.entriesAtDraw === 8 && pick.json.personId === alex.id, pick.json);
 ok('second pick with 1 slot → 409', (await api('POST', `/giveaways/${gid}/winners`, { entrantId: sam.id })).status === 409);
 ok('notify without Discord → 503', (await api('POST', `/giveaways/${gid}/winners/${pick.json.id}/notify`)).status === 503);
 const declined = await api('POST', `/giveaways/${gid}/winners/${pick.json.id}/outcome`, { outcome: 'declined' });
@@ -252,7 +252,9 @@ const winnerSettings = await api('POST', '/giveaways', {
   platforms: [{ platform: 'discord', settings: { channel: 'ws' }, rules: discordReq }],
   winnerCount: 2, winnerSelect: 'auto', winnerNotify: 'auto', notifyDelayMinutes: 1, winnerMessage: 'Hi {name}', claimHours: 3,
 });
-ok('create keeps winner settings', winnerSettings.status === 201 && winnerSettings.json.winnerCount === 2 && winnerSettings.json.winnerSelect === 'auto' && winnerSettings.json.notifyDelayMinutes === 1 && winnerSettings.json.winnerMessage === 'Hi {name}', winnerSettings.json);
+ok('create keeps winner settings', winnerSettings.status === 201 && winnerSettings.json.winners.count === 2 && winnerSettings.json.winners.select === 'auto' && winnerSettings.json.winners.notifyDelayMinutes === 1 && winnerSettings.json.winners.message === 'Hi {name}' && winnerSettings.json.winnerCount === 2, winnerSettings.json);
+const grouped = await api('PATCH', `/giveaways/${winnerSettings.json.id}`, { winners: { ...winnerSettings.json.winners, count: 3, message: null } });
+ok('PATCH grouped winners (read-only fields sent back are ignored)', grouped.status === 200 && grouped.json.winners.count === 3 && grouped.json.winners.message === null && grouped.json.winners.claimHours === 3, grouped.json);
 ok('create with nulls → defaults', capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0 && capped.json.baseWeight === 1, capped.json);
 ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}?confirm=Capped`)).status === 409);
 const cg = await svc.getOpenGiveaway();

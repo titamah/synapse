@@ -3,7 +3,7 @@
 Reference for developers working with Synapse giveaways (the admin dashboard, scripts, future clients).
 Design and reasoning: [giveaway-engine-v2-spec.md](giveaway-engine-v2-spec.md). Endpoints: [admin-api.md](admin-api.md).
 
-> **Status:** v2 is the agreed design and is **not built yet**. The live API currently serves v1 (`entryMethods` + a flat `rules` list); see admin-api.md. This document describes v2.
+> **Status:** built on branch `feat/engine-v2`; the live server still runs v1 until it's deployed. The v2 API also accepts and returns the v1 fields during the move (see admin-api.md, "v1 compatibility").
 
 **Conventions**
 - Timestamps are ISO 8601 strings with an offset (`2026-11-20T22:30:00-05:00`); responses use UTC (`…Z`). Show them in Eastern time.
@@ -37,6 +37,8 @@ Design and reasoning: [giveaway-engine-v2-spec.md](giveaway-engine-v2-spec.md). 
   "eligibleCount": 0,
   "entryCount": 0,
   "stats": null,
+  "personalDataDeletesAt": null,
+  "personalDataDeletedAt": null,
   "createdAt": "…", "updatedAt": "…"
 }
 ```
@@ -62,7 +64,9 @@ Design and reasoning: [giveaway-engine-v2-spec.md](giveaway-engine-v2-spec.md). 
 | `entrantCount` | integer | — | People with any activity (eligible or not, excluding disqualified). |
 | `eligibleCount` | integer | — | People who meet every required rule. |
 | `entryCount` | integer | — | Total entries across eligible people (base + bonuses × weights). |
-| `stats` | `Stats` \| null | — | Snapshot taken at close. Kept after personal data is deleted (90 days after the end). |
+| `stats` | `Stats` \| null | — | Snapshot taken at close (refreshed daily until personal data is deleted). Kept after personal data is deleted (90 days after the end). |
+| `personalDataDeletesAt` | timestamp \| null | — | When people, activity and entries will be deleted (90 days after the end). Set once closed. |
+| `personalDataDeletedAt` | timestamp \| null | — | Set once they were. The dashboard shows "removed per privacy policy" and uses `stats`. |
 | `createdAt`, `updatedAt` | timestamp | — | Bookkeeping. |
 
 **Rules the API enforces on save:** every platform has at least 1 rule; when Discord has `enter` required and another platform is present, the form has a required account field for that platform; rule windows end after they start; dates don't overlap another open or scheduled giveaway (one at a time).
@@ -96,7 +100,7 @@ A **discriminated union** on `platform`. Each kind has its own `settings` and al
 | `autoIncludeHashtag` | string (`#word`), *nullable* | Our posts whose caption contains this hashtag join `posts` automatically. |
 | `sync` | `InstagramSync` (read-only) | Last comment/tag read: `lastRunAt`, `lastSuccessAt`, `lastError` (show a warning if set), `lastResult`. |
 
-`InstagramPost` (read): `{ "id", "permalink", "postedAt", "thumbnailUrl" }`. On write, send a link (`https://www.instagram.com/p/…`, Reels included) or a media ID.
+`InstagramPost` (read): `{ "id", "permalink", "postedAt" }` (thumbnails expire, so get them from `GET /instagram/posts`). On write, send a link (`https://www.instagram.com/p/…`, Reels included) or a media ID.
 
 ---
 
@@ -206,7 +210,8 @@ Discord updates in `#community-updates` (admin-only). Every field is optional; d
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | integer | |
-| `personId` | integer | The winning person. |
+| `personId` | integer \| null | The winning person (`null` once personal data is deleted). |
+| `person` | `{ discordId, discordUsername, igUsername }` \| null | Who won, kept for 1 year after the end, then `null` (anonymized). |
 | `status` | `"pending"` \| `"checking"` \| `"notified"` \| `"unreachable"` \| `"accepted"` \| `"declined"` \| `"expired"` | **checking**: waiting on manual winner checks. **unreachable**: DMs closed or Instagram-only; admins reach out. **declined / expired**: entries disqualified, slot refilled. |
 | `checks` | `{ ruleId, label, confirmed: boolean \| null }[]` | Manual winner checks and their state. |
 | `selectedBy` | string | `"auto"` or the admin. |

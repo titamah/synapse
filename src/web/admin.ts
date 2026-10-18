@@ -139,6 +139,17 @@ const giveawayFields = {
     }),
   ),
   testMode: unset(z.boolean()),
+  winners: unset(
+    z.object({
+      count: unset(z.number().int().min(1).max(100)),
+      select: unset(z.enum(['manual', 'auto'])),
+      notify: unset(z.enum(['manual', 'auto'])),
+      notifyDelayMinutes: unset(z.number().int().min(0).max(7 * 24 * 60)),
+      message: z.string().max(1500).nullish(),
+      claimHours: unset(z.number().int().min(1).max(720)),
+    }).passthrough(), // read-only fields (defaultMessage, history) are ignored
+  ),
+  // ----- flat winner fields (v1 names; the grouped `winners` object wins when both are sent)
   winnerCount: unset(z.number().int().min(1).max(100)),
   winnerSelect: unset(z.enum(['manual', 'auto'])),
   winnerNotify: unset(z.enum(['manual', 'auto'])),
@@ -159,6 +170,22 @@ type GiveawayInput = z.infer<typeof updateSchema>;
 
 // ---------------------------------------------------------------------------
 // v1 → v2 translation
+
+/** Grouped `winners` settings → the flat columns (grouped wins over the flat v1 names). */
+function winnerColumns(input: GiveawayInput) {
+  const w = input.winners;
+  const pick = <T>(grouped: T | undefined, flat: T | undefined) => (grouped !== undefined ? grouped : flat);
+  return {
+    winnerCount: pick(w?.count, input.winnerCount),
+    winnerSelect: pick(w?.select, input.winnerSelect),
+    winnerNotify: pick(w?.notify, input.winnerNotify),
+    notifyDelayMinutes: pick(w?.notifyDelayMinutes, input.notifyDelayMinutes),
+    winnerMessage: pick(w && 'message' in w ? w.message : undefined, input.winnerMessage),
+    claimHours: pick(w?.claimHours, input.claimHours),
+  };
+}
+
+const winnerJson = <W extends { entrantId: number | null }>(w: W) => ({ personId: w.entrantId, ...w });
 
 const V1_ACTION = { ig_comment: 'comment', ig_story: 'story', ig_tag: 'tag' } as const;
 const toV1Action = (a: string) => (({ comment: 'ig_comment', story: 'ig_story', tag: 'ig_tag' }) as Record<string, string>)[a] ?? a;
@@ -293,18 +320,19 @@ async function giveawayJson(g: Giveaway, client?: Client) {
     maxParticipants: g.maxParticipants,
     testMode: g.testMode,
     announcements: resolveAnnouncements(g.announcements),
-    winnerCount: g.winnerCount,
-    winnerSelect: g.winnerSelect,
-    winnerNotify: g.winnerNotify,
-    notifyDelayMinutes: g.notifyDelayMinutes,
-    winnerMessage: g.winnerMessage,
-    defaultWinnerMessage: DEFAULT_WINNER_MESSAGE,
-    claimHours: g.claimHours,
-    winners: await listWinners(g.id),
+    winners: {
+      count: g.winnerCount,
+      select: g.winnerSelect,
+      notify: g.winnerNotify,
+      notifyDelayMinutes: g.notifyDelayMinutes,
+      message: g.winnerMessage,
+      defaultMessage: DEFAULT_WINNER_MESSAGE,
+      claimHours: g.claimHours,
+      history: (await listWinners(g.id)).map(winnerJson),
+    },
     closedAt: g.closedAt,
     closeReason: g.closeReason,
-    entrantCount: await participantCount(g.id, rules),
-    peopleCount: people.filter(p => !p.revokedAt).length,
+    entrantCount: people.filter(p => !p.revokedAt).length,
     eligibleCount: eligible.length,
     entryCount: eligible.reduce((s, p) => s + p.result.entries.total, 0),
     igSync: sync,
@@ -317,6 +345,14 @@ async function giveawayJson(g: Giveaway, client?: Client) {
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     // ----- v1 mirrors (deprecated): for dashboards not yet on v2.
+    discordEntrantCount: await participantCount(g.id, rules),
+    winnerCount: g.winnerCount,
+    winnerSelect: g.winnerSelect,
+    winnerNotify: g.winnerNotify,
+    notifyDelayMinutes: g.notifyDelayMinutes,
+    winnerMessage: g.winnerMessage,
+    defaultWinnerMessage: DEFAULT_WINNER_MESSAGE,
+    claimHours: g.claimHours,
     entryMethods: [...(takesDiscordEntries(rules) ? ['discord'] : []), ...(rules.some(r => r.platform === 'instagram' && r.type === 'required') && !takesDiscordEntries(rules) ? ['instagram'] : [])],
     entryChannel: discordChannel(g),
     igMediaId: firstPost?.id ?? null,
@@ -334,6 +370,10 @@ function personJson(p: PersonReport, rules: EngineRule[]) {
     const r = rules.find(x => x.id === id);
     return r ? ruleLabel(r) : `rule #${id}`;
   };
+  const describe = (id: number) => {
+    const r = rules.find(x => x.id === id);
+    return r ? describeRule(r) : `rule #${id}`;
+  };
   return {
     id: p.id,
     discord: p.discordId ? { id: p.discordId, username: p.discordUsername } : null,
@@ -343,7 +383,7 @@ function personJson(p: PersonReport, rules: EngineRule[]) {
     missing: p.result.missing.map(label),
     winnerChecks: p.result.winnerChecks.map(label),
     entries: p.result.entries,
-    breakdown: p.result.breakdown.map(b => ({ ...b, label: label(b.ruleId) })),
+    breakdown: p.result.breakdown.map(b => ({ ...b, label: label(b.ruleId), description: describe(b.ruleId) })),
     requirements: p.result.requirements.map(r => ({ ...r, label: label(r.ruleId) })),
     overrides: p.overrides.map(o => ({ id: o.id, kind: o.kind, ruleId: o.ruleId, label: o.label, weight: o.weight, reason: o.reason, by: o.createdBy, at: o.createdAt })),
     inServer: p.inServer,
@@ -470,6 +510,7 @@ export function createAdminRouter(client?: Client) {
     const resolved = await resolvePosts(ig?.settings?.posts ?? [], []);
     if ('error' in resolved) return void res.status(resolved.error!.status).json({ error: resolved.error!.message });
 
+    const wc = winnerColumns(input);
     let slug = slugify(input.name) || 'giveaway';
     for (let n = 2; await db.query.giveaways.findFirst({ where: eq(giveaways.slug, slug) }); n++) slug = `${slugify(input.name)}-${n}`;
 
@@ -488,12 +529,12 @@ export function createAdminRouter(client?: Client) {
           maxParticipants: input.maxParticipants ?? null,
           ...(input.announcements ? { announcements: input.announcements } : {}),
           testMode: input.testMode ?? false,
-          winnerCount: input.winnerCount ?? 1,
-          winnerSelect: input.winnerSelect ?? 'manual',
-          winnerNotify: input.winnerNotify ?? 'manual',
-          notifyDelayMinutes: input.notifyDelayMinutes ?? 30,
-          winnerMessage: input.winnerMessage ?? null,
-          claimHours: input.claimHours ?? 12,
+          winnerCount: wc.winnerCount ?? 1,
+          winnerSelect: wc.winnerSelect ?? 'manual',
+          winnerNotify: wc.winnerNotify ?? 'manual',
+          notifyDelayMinutes: wc.notifyDelayMinutes ?? 30,
+          winnerMessage: wc.winnerMessage ?? null,
+          claimHours: wc.claimHours ?? 12,
         })
         .returning();
       await tx.insert(giveawayRules).values(ruleRows(platforms).map(({ id: _id, ...r }, i) => ({ ...r, giveawayId: created!.id, position: i + 1 })));
@@ -545,7 +586,8 @@ export function createAdminRouter(client?: Client) {
     if ('error' in resolved) return void res.status(resolved.error!.status).json({ error: resolved.error!.message });
     const newPost = resolved.posts.some(p => !(g.platformSettings.instagram?.posts ?? []).some(o => o.id === p.id));
 
-    const { platforms: _p, entryMethods: _m, entryChannel: _c, igPost: _i, rules: _r, formFields: _f, ...settings } = input;
+    const { platforms: _p, entryMethods: _m, entryChannel: _c, igPost: _i, rules: _r, formFields: _f, winners: _w, ...rest } = input;
+    const settings = { ...rest, ...winnerColumns(input) };
     await db.transaction(async tx => {
       const changes = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined));
       await tx
@@ -633,7 +675,7 @@ export function createAdminRouter(client?: Client) {
   // "Sync now": read the posts' comments and tagged posts immediately and return the result.
   router.post('/giveaways/:id/sync', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
-    if (!g.platformSettings.instagram?.posts?.length && !(await hasTagRules(g))) {
+    if (!g.platformSettings.instagram?.posts?.length && !g.platformSettings.instagram?.autoIncludeHashtag && !(await hasTagRules(g))) {
       return void res.status(400).json({ error: "Add the giveaway's Instagram post (or a tagged-post rule) first" });
     }
     await runCommentSync(g, 'manual');
@@ -767,7 +809,7 @@ export function createAdminRouter(client?: Client) {
       (await listWinners(g.id)).map(w => {
         const p = w.entrantId ? byId.get(w.entrantId) : undefined;
         // After personal data is deleted, `person` (who won) is all that's left; null once anonymized.
-        return { ...w, entrant: p ? { ...p, activities: undefined } : null };
+        return { ...winnerJson(w), entrant: p ? { ...p, activities: undefined } : null };
       }),
     );
   });
@@ -789,8 +831,9 @@ export function createAdminRouter(client?: Client) {
     const pick = (await eligiblePool(g, client)).find(p => p.person.id === id);
     if (!pick) return void res.status(400).json({ error: "That person can't win: not eligible, disqualified, or already picked." });
     const w = await selectWinner(client, g, pick.person, req.actor!);
+    if (!w) return void res.status(409).json({ error: 'That person was just picked.' });
     if (v1) return void res.json({ winner: { ...pick.person, activities: undefined }, record: w });
-    res.status(201).json(w);
+    res.status(201).json(winnerJson(w));
   }
   // Deprecated alias for older dashboard code.
   router.post('/giveaways/:id/winner', requireActor, (req: Req, res) => pickWinner(req, res, true));
@@ -802,7 +845,7 @@ export function createAdminRouter(client?: Client) {
     if (problem) return void res.status(409).json({ error: problem });
     const w = await drawWinner(client, g, req.actor!);
     if (!w) return void res.status(409).json({ error: 'No eligible people left to draw.' });
-    res.status(201).json(w);
+    res.status(201).json(winnerJson(w));
   });
 
   // Winner checks (e.g. "follows @BostonBlerds"): confirm or reject one.
