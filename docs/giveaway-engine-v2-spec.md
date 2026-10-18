@@ -2,6 +2,8 @@
 
 **Status:** Draft v2 · **Owner:** Boston Blerds · **Replaces:** `entryMethods` and the flat `rules` list in v1
 
+Field-by-field reference: [giveaway-object.md](giveaway-object.md).
+
 A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: you must enter on Discord and follow us; comments and Stories are bonuses."*
 
 **Platforms → rules (required or bonus) → eligibility and entries.** Everything people do is recorded in an activity log; eligibility and entries are calculated from it, so rule changes apply retroactively and order never matters.
