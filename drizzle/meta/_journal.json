@@ -78,6 +78,20 @@
       "when": 1792280458079,
       "tag": "0010_drop_entry_method",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792364449829,
+      "tag": "0011_engine_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792364518280,
+      "tag": "0012_engine_v2_data",
+      "breakpoints": true
     }
   ]
 }

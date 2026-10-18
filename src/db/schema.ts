@@ -1,7 +1,13 @@
 import { sql } from 'drizzle-orm';
 import { boolean, pgEnum, pgTable, serial, text, timestamp, integer, jsonb, uniqueIndex, index } from 'drizzle-orm/pg-core';
 
-/** Ways to enter a giveaway. New platforms get added here. */
+/** Platforms a giveaway can run on. New platforms get added here. */
+export const PLATFORMS = ['discord', 'instagram'] as const;
+export type Platform = (typeof PLATFORMS)[number];
+/** Platforms people have a username on (everything except Discord, which is the entry form itself). */
+export type AccountPlatform = Exclude<Platform, 'discord'>;
+
+/** @deprecated v1; replaced by platforms + rules. Kept until the migration drops it. */
 export const ENTRY_METHODS = ['discord', 'instagram'] as const;
 export type EntryMethod = (typeof ENTRY_METHODS)[number];
 
@@ -9,10 +15,24 @@ export type EntryMethod = (typeof ENTRY_METHODS)[number];
 export type FormField = {
   id: string;
   label: string;
-  type: 'ig_username' | 'short_text' | 'long_text' | 'select';
+  /** account = a username on another platform; ig_username is the v1 name for an Instagram account field. */
+  type: 'account' | 'short_text' | 'long_text' | 'select' | 'ig_username';
   required: boolean;
   placeholder?: string | undefined;
   options?: string[] | undefined;
+  /** account fields: which platform(s) the username is for. */
+  platforms?: AccountPlatform[] | undefined;
+  /** Added by Synapse because a platform requires it; clients shouldn't remove it. */
+  locked?: boolean | undefined;
+};
+
+/** Per-platform settings on a giveaway. A platform is "on" when the giveaway has rules for it. */
+export type PlatformSettings = {
+  discord?: { channel: string | null } | undefined;
+  instagram?: {
+    posts: { id: string; permalink: string; postedAt: string }[];
+    autoIncludeHashtag?: string | null | undefined;
+  } | undefined;
 };
 
 /** Which Discord updates a giveaway posts in #community-updates. Missing values use the defaults. */
@@ -44,7 +64,11 @@ export const giveaways = pgTable('giveaways', {
   endsAt: timestamp('closes_at', { withTimezone: true }).notNull(),
   closedAt: timestamp('closed_at', { withTimezone: true }),
   closeReason: text('close_reason'),
-  // How people can enter (one or more): discord = /giveaway enter; instagram = first counted Instagram action.
+  // Entries for being eligible (meeting every required rule).
+  baseWeight: integer('base_weight').notNull().default(1),
+  // Discord channel, Instagram posts, etc. (see PlatformSettings).
+  platformSettings: jsonb('platform_settings').$type<PlatformSettings>().notNull().default({}),
+  // @deprecated v1 (entry_methods, entry_channel, ig_*): replaced by rules + platform_settings.
   entryMethods: text('entry_methods').array().$type<EntryMethod[]>().notNull().default(sql`ARRAY['discord']::text[]`),
   entryChannel: text('entry_channel'),
   formFields: jsonb('form_fields').$type<FormField[]>().notNull().default([]),
@@ -68,7 +92,17 @@ export const giveaways = pgTable('giveaways', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-export type RuleAction = 'ig_comment' | 'ig_story' | 'ig_tag';
+/** Actions per platform. follow is manual (an admin confirms it); the rest are detected. */
+export const ACTIONS = {
+  discord: ['enter', 'member'],
+  instagram: ['follow', 'comment', 'story', 'tag'],
+} as const satisfies Record<Platform, readonly string[]>;
+export type DiscordAction = (typeof ACTIONS)['discord'][number];
+export type InstagramAction = (typeof ACTIONS)['instagram'][number];
+export type RuleAction = DiscordAction | InstagramAction;
+export const MANUAL_ACTIONS: readonly RuleAction[] = ['follow'];
+/** @deprecated v1 action names, converted by the migration. */
+export type LegacyRuleAction = 'ig_comment' | 'ig_story' | 'ig_tag';
 export type RuleOptions = {
   /** ig_comment: must @mention someone other than us or the commenter. */
   requireTag?: boolean | undefined;
@@ -86,7 +120,15 @@ export const giveawayRules = pgTable(
     id: serial('id').primaryKey(),
     giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
     position: integer('position').notNull().default(0),
+    platform: text('platform').$type<Platform>().notNull().default('instagram'),
     action: text('action').$type<RuleAction>().notNull(),
+    // required = needed to be eligible (part of the base entry); bonus = adds weight entries per action.
+    type: text('type').$type<'required' | 'bonus'>().notNull().default('bonus'),
+    weight: integer('weight').notNull().default(1),
+    // required: times it must be done (reserved; dashboards can hide it).
+    min: integer('min').notNull().default(1),
+    // manual actions: confirm for the winner only, or for everyone.
+    check: text('check').$type<'winners' | 'everyone'>(),
     maxCount: integer('max_count').notNull(),
     windowStart: timestamp('window_start', { withTimezone: true }),
     windowEnd: timestamp('window_end', { withTimezone: true }),
@@ -153,7 +195,7 @@ export const bonuses = pgTable(
   ],
 );
 
-export type WinnerStatus = 'pending' | 'notified' | 'unreachable' | 'accepted' | 'declined' | 'expired';
+export type WinnerStatus = 'checking' | 'pending' | 'notified' | 'unreachable' | 'accepted' | 'declined' | 'expired';
 
 /**
  * Every winner picked, in order, with what happened. Declined and expired winners stay
@@ -178,9 +220,65 @@ export const winners = pgTable(
     outcomeBy: text('outcome_by'),
     dmChannelId: text('dm_channel_id'),
     dmMessageId: text('dm_message_id'),
+    // Manual winner checks (e.g. follows): one entry per rule, confirmed true/false or null while waiting.
+    checks: jsonb('checks').$type<{ ruleId: number; label: string; confirmed: boolean | null; by?: string; at?: string }[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   t => [index('winners_giveaway_idx').on(t.giveawayId), uniqueIndex('winners_giveaway_entrant_uq').on(t.giveawayId, t.entrantId)],
+);
+
+/**
+ * Every action anyone does in a giveaway, from any platform, in any order: the source of truth.
+ * Eligibility and entries are calculated from this (never stored), so rule changes are retroactive.
+ * A person is matched by Discord ID and/or account username.
+ */
+export const activities = pgTable(
+  'activities',
+  {
+    id: serial('id').primaryKey(),
+    giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+    platform: text('platform').$type<Platform>().notNull(),
+    action: text('action').$type<RuleAction>().notNull(),
+    discordId: text('discord_id'),
+    igUsername: text('ig_username'),
+    // The comment / Story / post ID (or Discord user ID for enter), so nothing counts twice.
+    sourceRef: text('source_ref').notNull(),
+    at: timestamp('at', { withTimezone: true }).notNull(),
+    // e.g. { taggedFriend, caption, mediaId, permalink }
+    details: jsonb('details').$type<Record<string, unknown>>().notNull().default({}),
+    // Deleted or hidden on the platform: no longer counts.
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+    removedReason: text('removed_reason'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  t => [
+    uniqueIndex('activities_source_uq').on(t.giveawayId, t.platform, t.action, t.sourceRef),
+    index('activities_giveaway_ig_idx').on(t.giveawayId, t.igUsername),
+    index('activities_giveaway_discord_idx').on(t.giveawayId, t.discordId),
+  ],
+);
+
+/**
+ * Admin decisions about one person: "count this requirement as met" (grandfathering, or
+ * confirming a manual check like follows) and manual entries. Logged with who and why.
+ */
+export const overrides = pgTable(
+  'overrides',
+  {
+    id: serial('id').primaryKey(),
+    giveawayId: integer('giveaway_id').notNull().references(() => giveaways.id, { onDelete: 'cascade' }),
+    entrantId: integer('entrant_id').notNull().references(() => entrants.id, { onDelete: 'cascade' }),
+    kind: text('kind').$type<'requirement_met' | 'manual_entry'>().notNull(),
+    ruleId: integer('rule_id').references(() => giveawayRules.id, { onDelete: 'cascade' }),
+    label: text('label'),
+    weight: integer('weight').notNull().default(1),
+    reason: text('reason'),
+    createdBy: text('created_by').notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedBy: text('revoked_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  t => [index('overrides_giveaway_entrant_idx').on(t.giveawayId, t.entrantId)],
 );
 
 /** Discord alerts already sent, so restarts never repeat one. */
