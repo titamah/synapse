@@ -4,7 +4,7 @@ Synapse is an open-source platform originally designed for Boston Blerds, create
 
 **BB-Bot** is Synapse's Discord interface: the bot members interact with.
 
-Current focus: the [GTA VI giveaway](docs/gta-giveaway-spec.md).
+Giveaways are run from the admin dashboard through the [Giveaway API](docs/giveaway-api.md).
 
 ## Stack
 
