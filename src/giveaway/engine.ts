@@ -25,7 +25,7 @@ export type EngineActivity = {
   platform: Platform;
   action: RuleAction;
   at: Date;
-  details: { taggedFriend?: boolean; caption?: string };
+  details: { taggedFriend?: boolean; caption?: string; mediaId?: string };
 };
 
 export type EngineOverride =
@@ -33,7 +33,7 @@ export type EngineOverride =
   | { kind: 'manual_entry'; weight: number; label: string | null };
 
 export type EngineInput = {
-  giveaway: { start: Date; end: Date; baseWeight: number; firstPostAt: Date | null };
+  giveaway: { start: Date; end: Date; baseWeight: number };
   rules: EngineRule[];
   person: { discordId: string | null; disqualified: boolean };
   activities: EngineActivity[];
@@ -77,12 +77,7 @@ function satisfies(r: EngineRule, a: EngineActivity, g: EngineInput['giveaway'])
   if (t < start || t >= end) return false;
   if (r.options.requireTag && !a.details.taggedFriend) return false;
   if (r.options.captionIncludes && !(a.details.caption ?? '').toLowerCase().includes(r.options.captionIncludes.toLowerCase())) return false;
-  return true;
-}
-
-/** Story mentions only count once the giveaway's first post is up (they don't say which post they're about). */
-function countable(a: EngineActivity, g: EngineInput['giveaway']) {
-  if (a.platform === 'instagram' && a.action === 'story') return !!g.firstPostAt && a.at >= g.firstPostAt;
+  if (r.options.posts?.length && !(a.details.mediaId && r.options.posts.includes(a.details.mediaId))) return false;
   return true;
 }
 
@@ -100,7 +95,7 @@ function countable(a: EngineActivity, g: EngineInput['giveaway']) {
 export function evaluatePerson(input: EngineInput): EngineResult {
   const { giveaway: g, rules, person, overrides } = input;
   const metByOverride = new Set(overrides.filter(o => o.kind === 'requirement_met').map(o => (o as { ruleId: number }).ruleId));
-  const pool = input.activities.filter(a => countable(a, g)).sort((x, y) => x.at.getTime() - y.at.getTime() || x.id - y.id);
+  const pool = [...input.activities].sort((x, y) => x.at.getTime() - y.at.getTime() || x.id - y.id);
   const used = new Set<number>();
 
   const required = rules.filter(r => r.type === 'required').sort((a, b) => a.position - b.position || a.id - b.id);
@@ -131,6 +126,7 @@ export function evaluatePerson(input: EngineInput): EngineResult {
         at: a.at,
         ...(a.details.taggedFriend !== undefined ? { taggedFriend: a.details.taggedFriend } : {}),
         ...(a.details.caption !== undefined ? { caption: a.details.caption } : {}),
+        ...(a.details.mediaId !== undefined ? { mediaId: a.details.mediaId } : {}),
       },
       { start: g.start, end: g.end },
       prior,

@@ -92,6 +92,7 @@ To keep people who'd lose out ("grandfather" them), add a `requirement_met` over
 | POST | `/instagram/renew` | Renew the token now; returns the status |
 
 - **Posts** (`platforms[instagram].settings.posts`) can be set any time, even after the start: comments count from `startsAt` by when they were written. Saving a new post triggers an immediate read; posts are re-read every 30 minutes while open and once more after close. A link that isn't on @BostonBlerds returns `400`.
+- **Comment rules for one post:** set `options.posts` on a comment rule (e.g. the promo Reel) and only comments on that post count for it. Without it, a comment rule counts comments on any giveaway post.
 - **`autoIncludeHashtag`:** our posts using that exact hashtag (from a week before the start until the end) are added to `posts` automatically on each read.
 - Deleted or hidden comments, and tagged posts that are deleted or no longer tag us, **stop counting** on the next read.
 

@@ -109,6 +109,8 @@ export type RuleOptions = {
   requireTag?: boolean | undefined;
   /** ig_tag: the post's caption must contain this text (e.g. a hashtag), case-insensitive. */
   captionIncludes?: string | undefined;
+  /** comment: only comments on these giveaway posts (media IDs) count. Unset = any giveaway post. */
+  posts?: string[] | undefined;
 };
 
 /**

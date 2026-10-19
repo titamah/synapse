@@ -355,6 +355,37 @@ const w2 = await api('POST', `/giveaways/${follow.json.id}/winners`, { personId:
 const rej = await api('POST', `/giveaways/${follow.json.id}/winners/${w2.json.id}/checks/${followRule.id}`, { confirmed: false });
 ok('check rejected → declined', rej.status === 200 && rej.json.status === 'declined', rej.json);
 
+// ----- A comment rule for one post: a bonus for commenting on the promo Reel, on top of the main post.
+const reelG = await api('POST', '/giveaways', {
+  name: 'Reel Bonus', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
+  platforms: [
+    { platform: 'discord', settings: { channel: 'reel' }, rules: discordReq },
+    { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] },
+  ],
+});
+await pool.query(`UPDATE giveaways SET platform_settings = jsonb_set(platform_settings, '{instagram,posts}', $2::jsonb) WHERE id = $1`,
+  [reelG.json.id, JSON.stringify([{ id: 'main', permalink: 'https://www.instagram.com/p/MAIN1/', postedAt: iso(now) }, { id: 'reel', permalink: 'https://www.instagram.com/reel/REEL1/', postedAt: iso(now) }])]);
+const reelRules = keepRules((await api('GET', `/giveaways/${reelG.json.id}`)).json);
+const badPosts = structuredClone(reelRules);
+badPosts[0].rules[0].options = { posts: ['reel'] };
+ok('"posts" on a non-comment rule → 400', (await api('PATCH', `/giveaways/${reelG.json.id}`, { platforms: badPosts })).status === 400);
+reelRules[1].rules.push({ action: 'comment', type: 'bonus', options: { posts: ['https://www.instagram.com/reel/REEL1/?igsh=abc'] } });
+const reelPatched = await api('PATCH', `/giveaways/${reelG.json.id}`, { platforms: reelRules });
+const reelRule = igRules(reelPatched.json)[1];
+ok('rule post given as a link is saved as its media ID', reelPatched.status === 200 && JSON.stringify(reelRule?.options.posts) === '["reel"]' && /one post only/.test(reelRule.label), reelPatched.json);
+const rg = await svc.getOpenGiveaway();
+await svc.submitEntry({ giveaway: rg, discordId: 'r1', discordUsername: 'r1', values: { ig: 'r1_ig' } });
+await svc.submitEntry({ giveaway: rg, discordId: 'r2', discordUsername: 'r2', values: { ig: 'r2_ig' } });
+const rc = (ig: string, ref: string, mediaId: string) => svc.recordInstagramActivity({ giveaway: rg, action: 'comment', igUsername: ig, at: new Date(), sourceRef: ref, details: { mediaId } });
+await rc('r1_ig', 'rc1', 'main');
+await rc('r1_ig', 'rc2', 'reel');
+await rc('r2_ig', 'rc3', 'main');
+await rc('r2_ig', 'rc4', 'main');
+const rPeople = (await api('GET', `/giveaways/${reelG.json.id}/people`)).json;
+ok('main + Reel comments → 1 + 1 + 1 = 3', rPeople.find((p: any) => p.discord.id === 'r1').entries.total === 3, rPeople);
+ok('two main-post comments → 1 + 1 = 2 (no Reel bonus)', rPeople.find((p: any) => p.discord.id === 'r2').entries.total === 2, rPeople);
+await api('POST', `/giveaways/${reelG.json.id}/close`);
+
 // ----- Retention: 90 days after the end, personal data goes; setup, stats and winners stay.
 const ret = await import(`${repo}/src/giveaway/retention.ts`);
 const fid = follow.json.id;

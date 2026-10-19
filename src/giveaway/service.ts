@@ -481,7 +481,7 @@ export async function computePeople(g: Giveaway, client?: Client, rulesOverride?
   const allActs = await db.select().from(activities).where(eq(activities.giveawayId, g.id));
   const ovs = await db.select().from(overrides).where(and(eq(overrides.giveawayId, g.id), isNull(overrides.revokedAt)));
   const members = await serverMemberIds(client).catch(() => null);
-  const window = { start: g.startsAt ?? g.createdAt, end: g.closedAt ?? g.endsAt, baseWeight: g.baseWeight, firstPostAt: firstPostAt(g) };
+  const window = { start: g.startsAt ?? g.createdAt, end: g.closedAt ?? g.endsAt, baseWeight: g.baseWeight };
 
   return people.map(p => {
     const mine = (a: Activity) => (p.discordId && a.discordId === p.discordId) || (p.igUsername && a.igUsername === p.igUsername);

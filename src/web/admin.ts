@@ -8,7 +8,7 @@ import { db } from '../db/client.js';
 import { ACTIONS, giveawayRules, giveaways, type FormField, type Platform, type PlatformSettings } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
 import { channelName } from '../discord/channels.js';
-import { listRecentPosts, resolvePost, type IgPost } from '../instagram/api.js';
+import { listRecentPosts, parseShortcode, resolvePost, type IgPost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
 import { hasTagRules } from '../instagram/tags.js';
 import { renewTokenIfDue, tokenStatus } from '../instagram/token.js';
@@ -71,7 +71,14 @@ const formFieldSchema = z
   .refine(f => f.type !== 'account' || !!f.platforms?.length, { message: 'account fields need platforms' });
 
 const ALL_ACTIONS = [...ACTIONS.discord, ...ACTIONS.instagram] as const;
-const ruleOptions = unset(z.object({ requireTag: unset(z.boolean()), captionIncludes: unset(z.string().min(1).max(100)) }));
+const ruleOptions = unset(
+  z.object({
+    requireTag: unset(z.boolean()),
+    captionIncludes: unset(z.string().min(1).max(100)),
+    // comment rules: only comments on these posts (links or media IDs). Added to the giveaway's posts if needed.
+    posts: unset(z.array(z.string().min(1).max(500)).max(10)).transform(v => (v?.length ? v : undefined)),
+  }),
+);
 
 const ruleSchema = z.object({
   id: unset(z.number().int()),
@@ -192,7 +199,7 @@ const toV1Action = (a: string) => (({ comment: 'ig_comment', story: 'ig_story', 
 
 /** Current platforms of a saved giveaway, in input shape (for merging partial v1 edits). */
 function currentPlatforms(g: Giveaway, rules: EngineRule[]): PlatformInput[] {
-  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes } });
+  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes, posts: r.options.posts } });
   const out: PlatformInput[] = [];
   const discord = rules.filter(r => r.platform === 'discord');
   if (discord.length) out.push({ platform: 'discord', settings: { channel: discordChannel(g) }, rules: discord.map(toInput) });
@@ -263,6 +270,7 @@ function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: Pl
       if (!(ACTIONS[p.platform] as readonly string[]).includes(r.action)) return { error: `"${r.action}" isn't a ${p.platform} action (use ${ACTIONS[p.platform].join(', ')})` };
       if (r.windowStart && r.windowEnd && r.windowEnd <= r.windowStart) return { error: 'rule windowEnd must be after windowStart' };
       if (r.check && r.action !== 'follow') return { error: '"check" only applies to manual actions (follow)' };
+      if (r.options?.posts && r.action !== 'comment') return { error: '"posts" only applies to comment rules' };
     }
   }
   const discord = merged.platforms.find(p => p.platform === 'discord');
@@ -404,20 +412,35 @@ async function lookupIgPost(value: string): Promise<{ post: IgPost; error?: unde
   }
 }
 
-/** Resolves post links/IDs to stored posts (reusing ones already saved, so unchanged posts need no API call). */
-async function resolvePosts(values: string[], existing: NonNullable<PlatformSettings['instagram']>['posts']) {
-  const out: NonNullable<PlatformSettings['instagram']>['posts'] = [];
-  for (const v of values) {
-    const known = existing.find(p => p.id === v || p.permalink === v);
+type StoredPost = NonNullable<PlatformSettings['instagram']>['posts'][number];
+
+/** Same post? Matches a media ID, or a link by its short code (so share junk like ?igsh= doesn't matter). */
+const samePost = (p: StoredPost, ref: string) => p.id === ref || p.permalink === ref || (!!parseShortcode(ref) && parseShortcode(ref) === parseShortcode(p.permalink));
+
+/**
+ * Resolves the Instagram platform's post links/IDs, including posts named on comment rules (those
+ * are added to the giveaway's posts so their comments get read). Reuses saved posts, so unchanged
+ * ones need no API call. Returns the posts, and the platforms with rule posts as media IDs.
+ */
+async function resolvePosts(platforms: PlatformInput[], existing: StoredPost[]) {
+  const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
+  if (!ig) return { posts: [] as StoredPost[], platforms };
+  const refs = [...(ig.settings?.posts ?? []), ...ig.rules.flatMap(r => r.options?.posts ?? [])];
+  const out: StoredPost[] = [];
+  for (const ref of refs) {
+    if (out.some(p => samePost(p, ref))) continue;
+    const known = existing.find(p => samePost(p, ref));
     if (known) {
       out.push(known);
       continue;
     }
-    const found = await lookupIgPost(v);
+    const found = await lookupIgPost(ref);
     if (found.error) return { error: found.error };
     if (!out.some(p => p.id === found.post.id)) out.push({ id: found.post.id, permalink: found.post.permalink, postedAt: found.post.postedAt });
   }
-  return { posts: out };
+  const idOf = (ref: string) => out.find(p => samePost(p, ref))!.id;
+  const rules = ig.rules.map(r => (r.options?.posts ? { ...r, options: { ...r.options, posts: [...new Set(r.options.posts.map(idOf))] } } : r));
+  return { posts: out, platforms: platforms.map(p => (p === ig ? { ...ig, rules } : p)) };
 }
 
 function settingsFrom(platforms: PlatformInput[], posts: NonNullable<PlatformSettings['instagram']>['posts']): PlatformSettings {
@@ -498,7 +521,7 @@ export function createAdminRouter(client?: Client) {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return void res.status(400).json({ error: z.prettifyError(parsed.error) });
     const input = parsed.data;
-    const platforms = input.platforms ?? platformsFromV1(input, null) ?? [];
+    let platforms = input.platforms ?? platformsFromV1(input, null) ?? [];
     if (!platforms.length) return void res.status(400).json({ error: 'pick at least one platform (platforms)' });
     const checked = crossCheck({ startsAt: input.startsAt, endsAt: input.endsAt, platforms, formFields: input.formFields ?? [] });
     if ('error' in checked) return void res.status(400).json({ error: checked.error });
@@ -506,9 +529,9 @@ export function createAdminRouter(client?: Client) {
     const overlap = await findOverlap(input.startsAt, input.endsAt);
     if (overlap) return void res.status(409).json({ error: `Overlaps with "${overlap.name}". Only one giveaway can run at a time.` });
 
-    const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
-    const resolved = await resolvePosts(ig?.settings?.posts ?? [], []);
+    const resolved = await resolvePosts(platforms, []);
     if ('error' in resolved) return void res.status(resolved.error!.status).json({ error: resolved.error!.message });
+    platforms = resolved.platforms;
 
     const wc = winnerColumns(input);
     let slug = slugify(input.name) || 'giveaway';
@@ -567,24 +590,23 @@ export function createAdminRouter(client?: Client) {
     if ('error' in checked) return { ok: false, status: 400, error: checked.error } as const;
     const ruleIds = ruleRows(platforms).filter(r => r.id).map(r => r.id!);
     if (ruleIds.some(id => !currentRules.some(c => c.id === id))) return { ok: false, status: 400, error: 'A rule id does not belong to this giveaway' } as const;
-    return { ok: true, input, platforms, merged, formFields: checked.formFields, currentRules } as const;
+    const resolved = await resolvePosts(platforms, g.platformSettings.instagram?.posts ?? []);
+    if ('error' in resolved) return { ok: false, status: resolved.error!.status, error: resolved.error!.message } as const;
+    return { ok: true, input, platforms: resolved.platforms, posts: resolved.posts, merged, formFields: checked.formFields, currentRules } as const;
   }
 
   router.patch('/giveaways/:id', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
     const prep = await prepareEdit(g, req.body);
     if (!prep.ok) return void res.status(prep.status).json({ error: prep.error });
-    const { input, platforms, merged, formFields, currentRules } = prep;
+    const { input, platforms, posts, merged, formFields, currentRules } = prep;
 
     if ((input.startsAt || input.endsAt) && !g.closedAt) {
       const overlap = await findOverlap(merged.startsAt!, merged.endsAt, g.id);
       if (overlap) return void res.status(409).json({ error: `Overlaps with "${overlap.name}". Only one giveaway can run at a time.` });
     }
 
-    const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
-    const resolved = await resolvePosts(ig?.settings?.posts ?? [], g.platformSettings.instagram?.posts ?? []);
-    if ('error' in resolved) return void res.status(resolved.error!.status).json({ error: resolved.error!.message });
-    const newPost = resolved.posts.some(p => !(g.platformSettings.instagram?.posts ?? []).some(o => o.id === p.id));
+    const newPost = posts.some(p => !(g.platformSettings.instagram?.posts ?? []).some(o => o.id === p.id));
 
     const { platforms: _p, entryMethods: _m, entryChannel: _c, igPost: _i, rules: _r, formFields: _f, winners: _w, ...rest } = input;
     const settings = { ...rest, ...winnerColumns(input) };
@@ -592,7 +614,7 @@ export function createAdminRouter(client?: Client) {
       const changes = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined));
       await tx
         .update(giveaways)
-        .set({ ...changes, formFields, platformSettings: settingsFrom(platforms, resolved.posts), updatedAt: new Date() })
+        .set({ ...changes, formFields, platformSettings: settingsFrom(platforms, posts), updatedAt: new Date() })
         .where(eq(giveaways.id, g.id));
 
       // Rules are replaced by the list sent: matched by id, new ones added, missing ones removed.

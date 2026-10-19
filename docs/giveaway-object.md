@@ -137,7 +137,7 @@ One shape for every rule. Which fields apply depends on `type` and `action`.
 | `options` | object | some actions | See the actions table. |
 | `description` | string | — | Read-only, human-readable summary. |
 
-**Counting:** an action that satisfies a required rule is part of the base entry and doesn't also earn a bonus. Bonus actions go to the most specific matching rule (narrowest window) that still has room, then list order.
+**Counting:** an action that satisfies a required rule is part of the base entry and doesn't also earn a bonus. Bonus actions go to the most specific matching rule that still has room (one limited to the comment's post first, then the narrowest window), then list order. Example: "comment, max 1" plus "comment on the Reel, max 1" gives +2 to someone who comments on the main post and the Reel.
 
 ### Actions
 | Platform | `action` | Detected | `options` | Meaning |
@@ -145,8 +145,8 @@ One shape for every rule. Which fields apply depends on `type` and `action`.
 | discord | `enter` | auto | — | Ran `/giveaway enter` and submitted the form. Creates the form and command. |
 | discord | `member` | auto | — | Is in the server when entries are counted (dashboard, export, draw). |
 | instagram | `follow` | **manual** | — | Follows @BostonBlerds. The bot can't see follows; an admin confirms (`check`). |
-| instagram | `comment` | auto | `requireTag: boolean` (must @mention someone other than us or the commenter) | Commented on a giveaway post. Deleted or hidden comments stop counting. |
-| instagram | `story` | auto | — | Mentioned @BostonBlerds in their Story (counts from when the first giveaway post went up). |
+| instagram | `comment` | auto | `requireTag: boolean` (must @mention someone other than us or the commenter); `posts: string[]` (optional: only comments on these posts count; links or media IDs, saved as IDs and added to the giveaway's posts) | Commented on a giveaway post. Deleted or hidden comments stop counting. |
+| instagram | `story` | auto | — | Mentioned @BostonBlerds in their Story (from `startsAt`; no post needed). |
 | instagram | `tag` | auto | `captionIncludes: string` (case-insensitive text the caption must contain, e.g. a hashtag) | Posted something that tags @BostonBlerds. Private accounts can't be seen. Deleted posts stop counting. |
 
 **Eligibility:** a person is eligible when every **required** rule on every platform is met and they aren't disqualified. If the giveaway has **no required rules**, any counted action makes them eligible (an "OR" giveaway).

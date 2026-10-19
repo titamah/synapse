@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { evaluatePerson, type EngineActivity, type EngineInput, type EngineRule } from '../src/giveaway/engine.js';
 
-const g = { start: new Date('2026-10-19T16:00:00-04:00'), end: new Date('2026-11-20T22:30:00-05:00'), baseWeight: 1, firstPostAt: new Date('2026-10-19T16:05:00-04:00') };
+const g = { start: new Date('2026-10-19T16:00:00-04:00'), end: new Date('2026-11-20T22:30:00-05:00'), baseWeight: 1 };
 const rule = (r: Partial<EngineRule> & Pick<EngineRule, 'id' | 'platform' | 'action' | 'type'>): EngineRule => ({
   position: r.id, weight: 1, min: 1, check: null, maxCount: 1, windowStart: null, windowEnd: null, frequency: null, options: {}, ...r,
 });
@@ -54,9 +54,29 @@ test('GTA: 6 Stories at the event (none before) → 5 event + 1 anytime; 7th ear
   assert.deepEqual(r.breakdown.map(b => [b.ruleId, b.count]), [[5, 1], [6, 5]]);
 });
 
-test('Story before the giveaway post went up does not count', () => {
-  const r = run({ activities: [act('discord', 'enter', '2026-10-20T12:00:00-04:00'), act('instagram', 'story', '2026-10-19T16:01:00-04:00')] });
-  assert.equal(r.entries.bonus, 0);
+test('Stories count from the giveaway start (no post needed); before it they do not', () => {
+  const r = run({ activities: [act('discord', 'enter', '2026-10-20T12:00:00-04:00'), act('instagram', 'story', '2026-10-19T16:01:00-04:00'), act('instagram', 'story', '2026-10-19T15:59:00-04:00')] });
+  assert.equal(r.entries.bonus, 1);
+});
+
+test('Comment rule for one post: the Reel comment earns its own bonus, on top of the main post one', () => {
+  const rules = [
+    rule({ id: 40, platform: 'discord', action: 'enter', type: 'required' }),
+    rule({ id: 41, platform: 'instagram', action: 'comment', type: 'bonus', options: { requireTag: true } }),
+    rule({ id: 42, platform: 'instagram', action: 'comment', type: 'bonus', options: { posts: ['reel'] } }),
+  ];
+  const enter = act('discord', 'enter', '2026-10-20T10:00:00-04:00');
+  const onMain = act('instagram', 'comment', '2026-10-20T11:00:00-04:00', { taggedFriend: true, mediaId: 'main' });
+  const onReel = act('instagram', 'comment', '2026-10-23T11:00:00-04:00', { taggedFriend: true, mediaId: 'reel' });
+  const both = run({ rules, activities: [enter, onMain, onReel] });
+  assert.deepEqual(both.breakdown.map(b => b.ruleId), [41, 42]);
+  assert.equal(both.entries.total, 3);
+  // Two Reel comments: one goes to the Reel rule, the other (tagged) to the any-post rule.
+  const reelTwice = run({ rules, activities: [enter, onReel, act('instagram', 'comment', '2026-10-24T11:00:00-04:00', { taggedFriend: true, mediaId: 'reel' })] });
+  assert.equal(reelTwice.entries.total, 3);
+  // A main-post comment never counts for the Reel rule.
+  const mainTwice = run({ rules, activities: [enter, onMain, act('instagram', 'comment', '2026-10-21T11:00:00-04:00', { taggedFriend: true, mediaId: 'main' })] });
+  assert.deepEqual(mainTwice.breakdown.map(b => b.ruleId), [41]);
 });
 
 test('Required comment (tagged) is part of the base; later comments are bonuses', () => {
