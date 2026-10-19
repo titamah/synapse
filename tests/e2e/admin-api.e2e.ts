@@ -137,8 +137,11 @@ const noRules = await api('POST', '/giveaways', { ...testGiveaway, platforms: [{
 ok('platform without rules → 400', noRules.status === 400, noRules.json);
 const badLink = await api('GET', '/instagram/resolve?url=not-a-link');
 ok('resolve: garbage link → 404 with a clear message', badLink.status === 404 && /instagram\.com\/p/.test(badLink.json.error), badLink.json);
-const noPost = await api('POST', '/giveaways', { ...testGiveaway, platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] }] });
-ok('comment rule without a post → 400', noPost.status === 400 && /need a post/.test(noPost.json.error), noPost.json);
+// A scheduled giveaway can leave a comment rule's post empty until the post goes up.
+const noPost = await api('POST', '/giveaways', { ...testGiveaway, name: 'No Post Yet', testMode: true, startsAt: '2028-03-01T12:00:00-05:00', endsAt: '2028-03-02T12:00:00-05:00',
+  platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: null, requireTag: true } }] }] });
+ok('comment rule without a post → saved, labeled "no post yet"', noPost.status === 201 && !igRules(noPost.json)[0].options.post && /no post yet/.test(igRules(noPost.json)[0].label), noPost.json);
+ok('…and deleted again', (await api('DELETE', `/giveaways/${noPost.json.id}`)).status === 200);
 const unknownPost = await api('POST', '/giveaways', { ...testGiveaway, platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: 'https://www.instagram.com/p/NOPE/' } }] }] });
 ok("post that isn't ours → 400", unknownPost.status === 400 && /Couldn't find that post/.test(unknownPost.json.error), unknownPost.json);
 const badDates = await api('POST', '/giveaways', { ...testGiveaway, endsAt: iso(now - 2 * 60 * 60e3) });

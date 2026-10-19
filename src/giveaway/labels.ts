@@ -17,6 +17,8 @@ export function ruleLabel(r: Pick<EngineRule, 'platform' | 'action' | 'options'>
   if (r.options.requireTag) label += ' (tagging a friend)';
   if (r.options.captionIncludes) label += ` (caption includes "${r.options.captionIncludes}")`;
   if (r.options.channel) label += ` in #${r.options.channel}`;
+  // A comment rule can wait for its post (e.g. a scheduled giveaway); it counts nothing until then.
+  if (r.platform === 'instagram' && r.action === 'comment' && !r.options.post) label += ' (no post yet)';
   if (r.options.post) label += ` (${r.options.post.permalink.replace(/^https?:\/\/(www\.)?/, '').replace(/[?#].*$/, '')})`;
   return label;
 }

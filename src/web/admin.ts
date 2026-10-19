@@ -266,7 +266,7 @@ type Checked = { error: string } | { formFields: FormField[] };
  * fields added and locked: when Discord "enter" is required and another platform is present,
  * the Discord form must collect that platform's username (it's how one person is linked).
  */
-function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: PlatformInput[]; formFields: FormField[] }, requirePosts = true): Checked {
+function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: PlatformInput[]; formFields: FormField[] }): Checked {
   if (!merged.startsAt || merged.endsAt <= merged.startsAt) return { error: 'endsAt must be after startsAt' };
   const seen = new Set<string>();
   for (const p of merged.platforms) {
@@ -277,7 +277,6 @@ function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: Pl
       if (r.windowStart && r.windowEnd && r.windowEnd <= r.windowStart) return { error: 'rule windowEnd must be after windowStart' };
       if (r.check && r.action !== 'follow') return { error: '"check" only applies to manual actions (follow)' };
       if (r.options?.post && r.action !== 'comment') return { error: '"post" only applies to comment rules' };
-      if (requirePosts && r.action === 'comment' && !r.options?.post) return { error: 'comment rules need a post (options.post: the post\'s link)' };
       if (r.options?.channel && r.action !== 'enter') return { error: '"channel" only applies to enter rules' };
       if (r.action === 'enter' && !r.options?.channel) return { error: 'enter rules need a channel (options.channel: the channel name)' };
     }
@@ -594,8 +593,7 @@ export function createAdminRouter(client?: Client) {
       platforms,
       formFields: input.formFields ?? g.formFields,
     };
-    // Posts are required on comment rules the request sends; rules saved before (v1) are left alone.
-    const checked = crossCheck(merged, !!input.platforms);
+    const checked = crossCheck(merged);
     if ('error' in checked) return { ok: false, status: 400, error: checked.error } as const;
     const ruleIds = platforms.flatMap(p => p.rules).filter(r => r.id).map(r => r.id!);
     if (ruleIds.some(id => !currentRules.some(c => c.id === id))) return { ok: false, status: 400, error: 'A rule id does not belong to this giveaway' } as const;

@@ -160,7 +160,7 @@ A declined or expired winner stays in the history, **all their entries are disqu
 
 ## Instagram
 
-- **Posts live on comment rules.** Each `comment` rule needs `options.post`: a post link (`instagram.com/p/…` or `/reel/…`; share links with `?igsh=` are fine) or a media ID. Links that aren't @BostonBlerds posts return `400`. For a bonus on another post (like a promo Reel), add another comment rule with that link.
+- **Posts live on comment rules.** Each `comment` rule takes `options.post`: a post link (`instagram.com/p/…` or `/reel/…`; share links with `?igsh=` are fine) or a media ID. Links that aren't @BostonBlerds posts return `400`. For a bonus on another post (like a promo Reel), add another comment rule with that link. The post can be `null` until it's up (e.g. on a scheduled giveaway): the rule counts nothing until a post is set, and when one is, comments from `startsAt` on are read back.
 - **Post picker:** `GET /instagram/posts?limit=12` lists our recent posts, newest first: `{ id, permalink, caption, mediaType, thumbnailUrl, postedAt, commentsCount }`. Thumbnail URLs expire, so don't store them. `GET /instagram/resolve?url=<link>` previews one post (`404` if not found).
 - **When things are read:** comments and Story mentions arrive instantly by webhook. Comments and tagged posts are also re-read every 30 minutes while open, right away when a new post is saved, and once more after close. Deleted or hidden comments, and deleted or untagged posts, stop counting on the next read. A post can be added any time; comments still count from `startsAt`.
 - **Sync now:** `POST /giveaways/:id/sync` reads immediately and returns the result ([InstagramSync](#instagramsync)). Show a warning if `lastError` is set.
@@ -252,7 +252,7 @@ CSV files, calculated on the server the same way as the dashboard and draws. Fil
 **Checked on save** (`400` with a message if not):
 - Every platform has at least 1 rule, and every rule's `action` belongs to its platform.
 - Every `enter` rule has a `channel`, and no two `enter` rules share one.
-- Every `comment` rule has a `post`, and it's one of @BostonBlerds' posts.
+- A `comment` rule's `post`, when set, is one of @BostonBlerds' posts.
 - `check` is only for `follow`; `post` is only for `comment`; `channel` is only for `enter`.
 - Rule windows end after they start.
 - With Discord `enter` and Instagram both present, the form gets a required, locked Instagram account field (added if missing).
@@ -334,7 +334,7 @@ One shape for every rule. Which fields matter depends on `type` and `action`.
 | discord | `enter` | auto | `channel` (**required**): the channel **name** where it counts. `#` and capitals are stripped (`#GTA-Giveaway` → `gta-giveaway`). | They run `/giveaway enter` in that channel and submit the form. A giveaway can have several `enter` rules, one per channel: `/giveaway enter` works in all of them, and each rule counts entries made in its own channel (e.g. required in #gta-giveaway, +1 bonus in #general). Entering again in the same channel just updates their answers. Having an `enter` rule creates the command and form. |
 | discord | `member` | auto | — | They're in the Discord server when entries are counted (dashboard, export, draw). |
 | instagram | `follow` | **manual** | — | They follow @BostonBlerds. The bot can't see follows; an admin confirms (see `check`). |
-| instagram | `comment` | auto | `post` (**required**): the post whose comments count. Send a link or media ID; returned as `{ id, permalink, postedAt }`. `requireTag` (boolean): the comment must @mention someone other than us or the commenter. | They comment (or reply) on that post. Deleted or hidden comments stop counting. |
+| instagram | `comment` | auto | `post`: the post whose comments count. Send a link or media ID; returned as `{ id, permalink, postedAt }`. *Nullable*: until set, the rule counts nothing and its label ends "(no post yet)". `requireTag` (boolean): the comment must @mention someone other than us or the commenter. | They comment (or reply) on that post. Deleted or hidden comments stop counting. |
 | instagram | `story` | auto | — | They mention @BostonBlerds in their Story. |
 | instagram | `tag` | auto | `captionIncludes` (string): text the caption must contain, any case, e.g. `#BBxGTAVI`. | They post to their feed (photo, carousel or Reel) tagging @BostonBlerds with "Tag people", during the rule's window. Not Story or caption-only mentions. Private accounts aren't visible. Deleted or untagged posts stop counting. ⚠️ A public tagged post didn't come through in testing; don't rely on this yet. |
 
