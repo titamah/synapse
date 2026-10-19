@@ -1,5 +1,5 @@
-import { OWN_IG_HANDLE, markMissingRemoved, normalizeIg, recordInstagramActivity, type Giveaway } from '../giveaway/service.js';
-import { getAllComments, giveawayPosts } from './api.js';
+import { OWN_IG_HANDLE, giveawayPosts, markMissingRemoved, normalizeIg, recordInstagramActivity, type Giveaway } from '../giveaway/service.js';
+import { getAllComments } from './api.js';
 
 /** "Tag a friend": the comment @mentions someone other than us or the commenter. */
 export function tagsAFriend(username: string, text: string): boolean {
@@ -27,7 +27,7 @@ export async function processComment(g: Giveaway, comment: { id: string; usernam
  * it throws and nothing is changed.
  */
 export async function syncComments(g: Giveaway) {
-  const posts = giveawayPosts(g);
+  const posts = await giveawayPosts(g);
   if (!posts.length) return null;
 
   const counts: Record<string, number> = { posts: posts.length, comments: 0, hidden: 0, removed: 0 };

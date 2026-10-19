@@ -24,11 +24,12 @@ export type FormField = {
 /** Per-platform settings on a giveaway. A platform is "on" when the giveaway has rules for it. */
 export type PlatformSettings = {
   discord?: { channel: string | null } | undefined;
-  instagram?: {
-    posts: { id: string; permalink: string; postedAt: string }[];
-    autoIncludeHashtag?: string | null | undefined;
-  } | undefined;
+  /** Present when Instagram counts. Posts live on the comment rules. */
+  instagram?: Record<string, never> | undefined;
 };
+
+/** One of @BostonBlerds' Instagram posts, as stored on a comment rule. */
+export type InstagramPost = { id: string; permalink: string; postedAt: string };
 
 /** Which Discord updates a giveaway posts in #community-updates. Missing values use the defaults. */
 export type AnnouncementSettings = {
@@ -109,8 +110,8 @@ export type RuleOptions = {
   requireTag?: boolean | undefined;
   /** ig_tag: the post's caption must contain this text (e.g. a hashtag), case-insensitive. */
   captionIncludes?: string | undefined;
-  /** comment: only comments on these giveaway posts (media IDs) count. Unset = any giveaway post. */
-  posts?: string[] | undefined;
+  /** comment: the post whose comments count. */
+  post?: InstagramPost | undefined;
 };
 
 /**

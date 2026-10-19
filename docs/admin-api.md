@@ -91,9 +91,8 @@ To keep people who'd lose out ("grandfather" them), add a `requirement_met` over
 | GET | `/instagram/status` | Connection health: `{ configured, expiresAt, refreshedAt, lastAttemptAt, lastError }`. The token renews itself weekly; warn if `lastError` is set or `expiresAt` is under 2 weeks away. |
 | POST | `/instagram/renew` | Renew the token now; returns the status |
 
-- **Posts** (`platforms[instagram].settings.posts`) can be set any time, even after the start: comments count from `startsAt` by when they were written. Saving a new post triggers an immediate read; posts are re-read every 30 minutes while open and once more after close. A link that isn't on @BostonBlerds returns `400`.
-- **Comment rules for one post:** set `options.posts` on a comment rule (e.g. the promo Reel) and only comments on that post count for it. Without it, a comment rule counts comments on any giveaway post.
-- **`autoIncludeHashtag`:** our posts using that exact hashtag (from a week before the start until the end) are added to `posts` automatically on each read.
+- **Posts live on comment rules** (`options.post`, required): send the post's link (Reels too; share junk like `?igsh=` is fine) or media ID; responses return the post (`id`, `permalink`, `postedAt`). A link that isn't on @BostonBlerds returns `400`. For a bonus on the promo Reel, add a second comment rule with the Reel's link.
+- A rule's post can be set or added any time, even after the start: comments count from `startsAt` by when they were written. A new post triggers an immediate read; posts are re-read every 30 minutes while open and once more after close.
 - Deleted or hidden comments, and tagged posts that are deleted or no longer tag us, **stop counting** on the next read.
 
 ---
@@ -131,9 +130,10 @@ await fetch('https://api.bostonblerds.com/admin/giveaways', {
         { action: 'enter', type: 'required' },
         { action: 'member', type: 'required' },
       ] },
-      { platform: 'instagram', settings: { posts: ['https://www.instagram.com/p/…'], autoIncludeHashtag: '#BBxGTAVI' }, rules: [
+      { platform: 'instagram', rules: [
         { action: 'follow', type: 'required', check: 'winners' },
-        { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { requireTag: true } },
+        { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { post: 'https://www.instagram.com/p/…', requireTag: true } },
+        { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { post: 'https://www.instagram.com/reel/…' } }, // promo Reel
         { action: 'story', type: 'bonus', weight: 1, maxCount: 1 },
         { action: 'story', type: 'bonus', weight: 1, maxCount: 5, windowStart: '2026-11-20T18:00:00-05:00', windowEnd: '2026-11-20T22:30:00-05:00' },
       ] },
@@ -149,7 +149,7 @@ await fetch('https://api.bostonblerds.com/admin/giveaways', {
 
 ## v1 compatibility (deprecated)
 
-So the current dashboard keeps working during the move, the API still **accepts** `entryMethods`, `entryChannel`, `igPost`, flat `rules` (`ig_comment` / `ig_story` / `ig_tag`), `ig_username` form fields and the flat winner fields (`winnerCount`, `winnerSelect`, `winnerNotify`, `notifyDelayMinutes`, `winnerMessage`, `claimHours`), and translates them into `platforms` / `winners`. Responses also include the v1 mirrors (`entryMethods`, `entryChannel`, `igMediaId`, `igPermalink`, `igPostedAt`, flat `rules`, flat winner fields), and the v1 routes still work: `GET /entrants`, `POST /bonuses` (= a manual-entry override), `DELETE /bonuses/:id`, `/entrants/:id/disqualify|restore`, `POST /winner`, and `{ entrantId }` when picking. **Breaking:** `winners` is now the grouped settings object (the pick list moved to `winners.history` and `GET /winners`). These will be removed once the dashboard is on v2.
+So the current dashboard keeps working during the move, the API still **accepts** `entryMethods`, `entryChannel`, `igPost` (goes on every comment rule), flat `rules` (`ig_comment` / `ig_story` / `ig_tag`), `ig_username` form fields and the flat winner fields (`winnerCount`, `winnerSelect`, `winnerNotify`, `notifyDelayMinutes`, `winnerMessage`, `claimHours`), and translates them into `platforms` / `winners`. Responses also include the v1 mirrors (`entryMethods`, `entryChannel`, `igMediaId`, `igPermalink`, `igPostedAt`, flat `rules`, flat winner fields), and the v1 routes still work: `GET /entrants`, `POST /bonuses` (= a manual-entry override), `DELETE /bonuses/:id`, `/entrants/:id/disqualify|restore`, `POST /winner`, and `{ entrantId }` when picking. **Breaking:** `winners` is now the grouped settings object (the pick list moved to `winners.history` and `GET /winners`). These will be removed once the dashboard is on v2.
 
 ---
 

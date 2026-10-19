@@ -1,8 +1,8 @@
 import { and, desc, eq, gt, isNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { giveaways, webhookEvents } from '../db/schema.js';
-import { getOpenGiveaway, normalizeIg, recordInstagramActivity, type Giveaway } from '../giveaway/service.js';
-import { getUsernameForSender, giveawayPosts } from './api.js';
+import { getOpenGiveaway, giveawayPosts, normalizeIg, recordInstagramActivity, type Giveaway } from '../giveaway/service.js';
+import { getUsernameForSender } from './api.js';
 import { processComment } from './comments.js';
 
 type Change = { field: string; value: any };
@@ -47,13 +47,12 @@ async function processStoryMention(g: Giveaway, m: Messaging) {
   const at = m.timestamp ? new Date(m.timestamp) : new Date();
   const username = normalizeIg(await getUsernameForSender(senderId));
   if (!username) return 'skipped';
-  // Recorded either way; the engine only counts Stories from after the first giveaway post.
   return recordInstagramActivity({ giveaway: g, action: 'story', igUsername: username, at, sourceRef: m.message.mid });
 }
 
 /** Records the comments (on giveaway posts) and Story mentions in a filtered payload. Safe to re-run. */
 export async function processInstagramPayload(payload: Payload, g: Giveaway) {
-  const postIds = new Set(giveawayPosts(g).map(p => p.id));
+  const postIds = new Set((await giveawayPosts(g)).map(p => p.id));
   for (const e of payload.entry ?? []) {
     for (const c of e.changes ?? []) {
       const v = c.value;

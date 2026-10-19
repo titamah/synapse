@@ -2,11 +2,9 @@ import { and, desc, gt, isNotNull, lte, or } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { giveaways } from '../db/schema.js';
 import { getSetting, setSetting } from '../db/settings.js';
-import { getOpenGiveaway, statusOf, type Giveaway } from '../giveaway/service.js';
-import { giveawayPosts } from './api.js';
+import { getOpenGiveaway, readsInstagram, statusOf, type Giveaway } from '../giveaway/service.js';
 import { syncComments } from './comments.js';
-import { includeHashtagPosts } from './hashtag.js';
-import { hasTagRules, syncTaggedPosts } from './tags.js';
+import { syncTaggedPosts } from './tags.js';
 
 export type SyncStatus = {
   lastRunAt: string;
@@ -31,7 +29,6 @@ export async function runCommentSync(g: Giveaway, reason: 'scheduled' | 'post-se
   const previous = await getSyncStatus(g.id);
   const now = new Date().toISOString();
   try {
-    if (statusOf(g) === 'open' || reason === 'final') g = await includeHashtagPosts(g);
     const result = { comments: await syncComments(g), taggedPosts: await syncTaggedPosts(g) };
     await setSetting(statusKey(g.id), {
       lastRunAt: now,
@@ -67,7 +64,7 @@ export async function runFinalSync(g: Giveaway) {
 /** Every 30 minutes: the open giveaway, plus a final read for any that closed in the last 2 days. */
 export async function runScheduledSyncs() {
   const open = await getOpenGiveaway();
-  if (open && (giveawayPosts(open).length || open.platformSettings.instagram?.autoIncludeHashtag || (await hasTagRules(open)))) await runCommentSync(open, 'scheduled');
+  if (open && (await readsInstagram(open))) await runCommentSync(open, 'scheduled');
 
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
   const recentlyClosed = await db.query.giveaways.findMany({
@@ -78,7 +75,7 @@ export async function runScheduledSyncs() {
     orderBy: desc(giveaways.endsAt),
   });
   for (const g of recentlyClosed) {
-    if (statusOf(g) === 'closed' && (giveawayPosts(g).length || g.platformSettings.instagram?.autoIncludeHashtag || (await hasTagRules(g)))) await runFinalSync(g);
+    if (statusOf(g) === 'closed' && (await readsInstagram(g))) await runFinalSync(g);
   }
 }
 

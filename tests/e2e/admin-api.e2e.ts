@@ -9,6 +9,26 @@ import os from 'os';
 import path from 'path';
 
 const repo = process.cwd();
+
+// A fake Instagram: three of our posts, and errors for everything else (comment/tag reads fail
+// harmlessly, so recorded activity is never touched by a background sync).
+process.env.IG_ACCESS_TOKEN ??= 'e2e-fake-token';
+const FAKE_POSTS = [
+  { id: '1000', permalink: 'https://www.instagram.com/p/P1/', media_type: 'IMAGE', timestamp: new Date(Date.now() - 2 * 3600e3).toISOString() },
+  { id: '1001', permalink: 'https://www.instagram.com/p/MAIN1/', media_type: 'IMAGE', timestamp: new Date(Date.now() - 3600e3).toISOString() },
+  { id: '1002', permalink: 'https://www.instagram.com/reel/REEL1/', media_type: 'VIDEO', timestamp: new Date(Date.now() - 1800e3).toISOString() },
+];
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async (input: any, init?: any) => {
+  const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
+  if (url.hostname !== 'graph.instagram.com') return realFetch(input, init);
+  const path = url.pathname.replace(/^\/v[\d.]+/, '');
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  if (path === '/me/media') return json({ data: FAKE_POSTS });
+  const post = FAKE_POSTS.find(p => path === `/${p.id}`);
+  if (post) return json(post);
+  return json({ error: { message: 'fake Instagram: not available in tests' } }, 400);
+}) as typeof fetch;
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'synapse-e2e-'));
 const { db, pool } = await import(`${repo}/src/db/client.ts`);
 await pool.query('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS drizzle CASCADE;');
@@ -35,6 +55,16 @@ await pool.query(`INSERT INTO entrants (giveaway_id, discord_id, discord_usernam
 await pool.query(`INSERT INTO bonuses (giveaway_id, ig_username, type, source, source_ref) VALUES (1, 'jay_ig', 'COMMENT', 'ig_webhook', 'c-legacy')`);
 
 // --- 2. Run the new migrations ---------------------------------------------------
+// Up to just before posts moved onto rules; GTA gets a saved post the old way, then the last migration runs.
+const almostDir = path.join(scratch, 'drizzle-almost');
+fs.mkdirSync(path.join(almostDir, 'meta'), { recursive: true });
+const fullJournal = JSON.parse(fs.readFileSync(`${repo}/drizzle/meta/_journal.json`, 'utf8'));
+const almost = { ...fullJournal, entries: fullJournal.entries.filter((e: any) => e.tag !== '0015_rule_posts') };
+fs.writeFileSync(path.join(almostDir, 'meta/_journal.json'), JSON.stringify(almost));
+for (const e of almost.entries) fs.copyFileSync(`${repo}/drizzle/${e.tag}.sql`, path.join(almostDir, `${e.tag}.sql`));
+await migrate(db, { migrationsFolder: almostDir });
+await pool.query(`UPDATE giveaways SET platform_settings = jsonb_set(platform_settings, '{instagram}', $1::jsonb) WHERE slug = 'gta6-2026'`,
+  [JSON.stringify({ posts: [{ id: '1000', permalink: 'https://www.instagram.com/p/P1/', postedAt: '2026-10-19T20:00:00.000Z' }] })]);
 await migrate(db, { migrationsFolder: `${repo}/drizzle` });
 const gta = (await pool.query(`SELECT * FROM giveaways WHERE slug='gta6-2026'`)).rows[0];
 ok('GTA becomes giveaway #1 with settings', gta.id === 1 && gta.name === 'GTA VI Giveaway' && gta.platform_settings.discord?.channel === 'gta-giveaway', gta);
@@ -47,6 +77,9 @@ ok('GTA rules: Discord enter + member required, IG comment + story bonus',
 const acts = (await pool.query(`SELECT * FROM activities WHERE giveaway_id=1 ORDER BY id`)).rows;
 ok('entrant → Discord enter activity; legacy bonus → comment activity',
   acts.some(a => a.platform === 'discord' && a.action === 'enter' && a.discord_id === 'd1') && acts.some(a => a.action === 'comment' && a.source_ref === 'c-legacy'), acts);
+const gtaComment = (await pool.query(`SELECT options FROM giveaway_rules WHERE giveaway_id=1 AND action='comment'`)).rows[0];
+const gtaSettings = (await pool.query(`SELECT platform_settings FROM giveaways WHERE id=1`)).rows[0].platform_settings;
+ok('GTA post moved onto its comment rule', gtaComment?.options.post?.id === '1000' && JSON.stringify(gtaSettings.instagram) === '{}', { gtaComment, gtaSettings });
 const oldTables = (await pool.query(`SELECT to_regclass('bonuses') AS b`)).rows[0].b;
 ok('v1 bonuses table dropped', oldTables === null, oldTables);
 
@@ -83,9 +116,9 @@ const testGiveaway = {
   baseWeight: 1,
   platforms: [
     { platform: 'discord', settings: { channel: '#Test-Giveaway' }, rules: discordReq },
-    { platform: 'instagram', settings: { posts: [] }, rules: [
+    { platform: 'instagram', rules: [
       { action: 'story', type: 'bonus', weight: 1, maxCount: 1 },
-      { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { requireTag: true } },
+      { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { requireTag: true, post: 'https://www.instagram.com/p/P1/?igsh=xyz' } },
     ] },
   ],
   formFields: [{ id: 'platform', label: 'What do you play on?', type: 'select', required: true, options: ['PS5', 'Xbox', 'PC'] }],
@@ -102,6 +135,10 @@ const noRules = await api('POST', '/giveaways', { ...testGiveaway, platforms: [{
 ok('platform without rules → 400', noRules.status === 400, noRules.json);
 const badLink = await api('GET', '/instagram/resolve?url=not-a-link');
 ok('resolve: garbage link → 404 with a clear message', badLink.status === 404 && /instagram\.com\/p/.test(badLink.json.error), badLink.json);
+const noPost = await api('POST', '/giveaways', { ...testGiveaway, platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] }] });
+ok('comment rule without a post → 400', noPost.status === 400 && /need a post/.test(noPost.json.error), noPost.json);
+const unknownPost = await api('POST', '/giveaways', { ...testGiveaway, platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: 'https://www.instagram.com/p/NOPE/' } }] }] });
+ok("post that isn't ours → 400", unknownPost.status === 400 && /Couldn't find that post/.test(unknownPost.json.error), unknownPost.json);
 const badDates = await api('POST', '/giveaways', { ...testGiveaway, endsAt: iso(now - 2 * 60 * 60e3) });
 ok('end before start → 400', badDates.status === 400, badDates.json);
 
@@ -111,21 +148,19 @@ ok('channel normalized', created.json.platforms[0].settings.channel === 'test-gi
 ok('Instagram account field added + locked (Discord entry + Instagram)',
   created.json.formFields[0].type === 'account' && created.json.formFields[0].locked === true && created.json.formFields.length === 2, created.json.formFields);
 ok('rules have labels', igRules(created.json).every((r: any) => r.label?.startsWith('Instagram:')), igRules(created.json));
+const savedPost = igRules(created.json).find((r: any) => r.action === 'comment').options.post;
+ok('comment rule post link resolved and stored with the rule', savedPost?.id === '1000' && savedPost.permalink === 'https://www.instagram.com/p/P1/' && !!savedPost.postedAt, savedPost);
 const gid = created.json.id;
 
 const overlap = await api('POST', '/giveaways', { ...testGiveaway, name: 'Overlapping' });
 ok('overlapping giveaway → 409', overlap.status === 409, overlap.json);
 
-// The giveaway post (set directly: no Instagram connection in tests). Stories count once it's up.
-await pool.query(`UPDATE giveaways SET platform_settings = jsonb_set(platform_settings, '{instagram,posts}', $2::jsonb) WHERE id = $1`,
-  [gid, JSON.stringify([{ id: 'p1', permalink: 'https://instagram.com/p/p1', postedAt: iso(now - 2 * 60 * 60e3) }])]);
-
 // Add an "event" window rule: 5 Stories during the next 2 hours.
-const keepRules = (j: any) => j.platforms.map((p: any) => ({ platform: p.platform, settings: p.platform === 'instagram' ? { posts: p.settings.posts.map((x: any) => x.id) } : p.settings, rules: p.rules.map(({ label, description, position, ...r }: any) => r) }));
+const keepRules = (j: any) => j.platforms.map((p: any) => ({ platform: p.platform, settings: p.settings, rules: p.rules.map(({ label, description, position, ...r }: any) => r) }));
 const withEvent = keepRules((await api('GET', `/giveaways/${gid}`)).json);
 withEvent[1].rules.push({ action: 'story', type: 'bonus', weight: 1, maxCount: 5, windowStart: iso(now - 30 * 60e3), windowEnd: iso(now + 2 * 60 * 60e3) });
 const patched = await api('PATCH', `/giveaways/${gid}`, { platforms: withEvent });
-ok('add event rule via PATCH (post kept)', patched.status === 200 && igRules(patched.json).length === 3 && patched.json.platforms[1].settings.posts[0]?.id === 'p1', patched.json);
+ok('add event rule via PATCH (post kept)', patched.status === 200 && igRules(patched.json).length === 3 && igRules(patched.json).find((r: any) => r.action === 'comment').options.post?.id === '1000', patched.json);
 ok('rule descriptions are readable', igRules(patched.json).some((r: any) => /bonus ×1, max 5, /.test(r.description)), igRules(patched.json).map((r: any) => r.description));
 
 // Dashboard forms often send null for empty optional fields.
@@ -151,9 +186,9 @@ await svc.submitEntry({ giveaway: open, discordId: 'u2', discordUsername: 'sam',
 
 const record = (action: string, ig: string, ref: string, details: Record<string, unknown> = {}) =>
   svc.recordInstagramActivity({ giveaway: open, action, igUsername: ig, at: new Date(), sourceRef: ref, details });
-ok('comment w/o tag → recorded', (await record('comment', 'alex.plays', 'c1', { taggedFriend: false })) === 'recorded');
-ok('comment with tag → recorded', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true })) === 'recorded');
-ok('same comment again → duplicate', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true })) === 'duplicate');
+ok('comment w/o tag → recorded', (await record('comment', 'alex.plays', 'c1', { taggedFriend: false, mediaId: '1000' })) === 'recorded');
+ok('comment with tag → recorded', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true, mediaId: '1000' })) === 'recorded');
+ok('same comment again → duplicate', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true, mediaId: '1000' })) === 'duplicate');
 for (let i = 1; i <= 7; i++) await record('story', 'alex.plays', `s${i}`);
 ok('own account never recorded', (await record('story', 'bostonblerds', 'own1')) === 'own-account');
 ok('story from someone not entered yet → recorded', (await record('story', 'newfan', 'n1')) === 'recorded');
@@ -212,7 +247,7 @@ ok('audit.csv records the admin email', /admin:tester@bostonblerds\.com/.test(au
 await svc.markMissingRemoved(gid, 'comment', new Set(['c1']), 'deleted');
 people = await api('GET', `/giveaways/${gid}/people`);
 ok('deleted comment → alex 7', find('alex').entries.total === 7, find('alex'));
-await record('comment', 'alex.plays', 'c2', { taggedFriend: true });
+await record('comment', 'alex.plays', 'c2', { taggedFriend: true, mediaId: '1000' });
 people = await api('GET', `/giveaways/${gid}/people`);
 ok('comment seen again → alex 8', find('alex').entries.total === 8, find('alex'));
 
@@ -289,7 +324,7 @@ ok('GTA giveaway untouched', (await api('GET', '/giveaways/1')).status === 200);
 const igOnly = await api('POST', '/giveaways', {
   name: 'IG Only', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
   platforms: [{ platform: 'instagram', rules: [
-    { action: 'comment', type: 'required' },
+    { action: 'comment', type: 'required', options: { post: 'https://www.instagram.com/p/MAIN1/' } },
     { action: 'tag', type: 'bonus', weight: 3, options: { captionIncludes: '#bbtest' } },
   ] }],
 });
@@ -297,7 +332,7 @@ ok('instagram-only giveaway created (no form needed)', igOnly.status === 201 && 
 const igG = await svc.getOpenGiveaway();
 const igRec = (action: string, ig: string, ref: string, details: Record<string, unknown> = {}) =>
   svc.recordInstagramActivity({ giveaway: igG, action, igUsername: ig, at: new Date(), sourceRef: ref, details });
-await igRec('comment', 'fan_one', 'igc1');
+await igRec('comment', 'fan_one', 'igc1', { mediaId: '1001' });
 await igRec('tag', 'fan_one', 'igt1', { caption: 'hi' });
 await igRec('tag', 'fan_one', 'igt2', { caption: 'entering #BBTest!' });
 await igRec('tag', 'lurker', 'igt3', { caption: '#bbtest' });
@@ -314,13 +349,13 @@ const either = await api('POST', '/giveaways', {
   name: 'Either Way', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
   platforms: [
     { platform: 'discord', settings: { channel: 'either' }, rules: [{ action: 'enter', type: 'bonus' }] },
-    { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] },
+    { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: '1001' } }] },
   ],
 });
 ok('either giveaway created, IG field auto-added', either.status === 201 && either.json.formFields[0]?.locked === true, either.json);
 const eg = await svc.getOpenGiveaway();
-await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'both_ways', at: new Date(), sourceRef: 'c-both' });
-await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'ig_only', at: new Date(), sourceRef: 'c-ig' });
+await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'both_ways', at: new Date(), sourceRef: 'c-both', details: { mediaId: '1001' } });
+await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'ig_only', at: new Date(), sourceRef: 'c-ig', details: { mediaId: '1001' } });
 const linked = await svc.submitEntry({ giveaway: eg, discordId: 'd-both', discordUsername: 'bothways', values: { ig: 'both_ways' } });
 ok('Discord entry links to the Instagram person', linked.status !== 'conflict' && linked.entrant?.discordId === 'd-both', linked);
 const ePeople = (await api('GET', `/giveaways/${either.json.id}/people`)).json;
@@ -355,32 +390,31 @@ const w2 = await api('POST', `/giveaways/${follow.json.id}/winners`, { personId:
 const rej = await api('POST', `/giveaways/${follow.json.id}/winners/${w2.json.id}/checks/${followRule.id}`, { confirmed: false });
 ok('check rejected → declined', rej.status === 200 && rej.json.status === 'declined', rej.json);
 
-// ----- A comment rule for one post: a bonus for commenting on the promo Reel, on top of the main post.
+// ----- Each comment rule has its own post: a bonus for the main post and another for the promo Reel.
 const reelG = await api('POST', '/giveaways', {
   name: 'Reel Bonus', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
   platforms: [
     { platform: 'discord', settings: { channel: 'reel' }, rules: discordReq },
-    { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] },
+    { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: 'https://www.instagram.com/p/MAIN1/' } }] },
   ],
 });
-await pool.query(`UPDATE giveaways SET platform_settings = jsonb_set(platform_settings, '{instagram,posts}', $2::jsonb) WHERE id = $1`,
-  [reelG.json.id, JSON.stringify([{ id: 'main', permalink: 'https://www.instagram.com/p/MAIN1/', postedAt: iso(now) }, { id: 'reel', permalink: 'https://www.instagram.com/reel/REEL1/', postedAt: iso(now) }])]);
-const reelRules = keepRules((await api('GET', `/giveaways/${reelG.json.id}`)).json);
-const badPosts = structuredClone(reelRules);
-badPosts[0].rules[0].options = { posts: ['reel'] };
-ok('"posts" on a non-comment rule → 400', (await api('PATCH', `/giveaways/${reelG.json.id}`, { platforms: badPosts })).status === 400);
-reelRules[1].rules.push({ action: 'comment', type: 'bonus', options: { posts: ['https://www.instagram.com/reel/REEL1/?igsh=abc'] } });
+const reelRules = keepRules(reelG.json);
+const badPost = structuredClone(reelRules);
+badPost[0].rules[0].options = { post: '1002' };
+ok('"post" on a non-comment rule → 400', (await api('PATCH', `/giveaways/${reelG.json.id}`, { platforms: badPost })).status === 400);
+reelRules[1].rules.push({ action: 'comment', type: 'bonus', options: { post: 'https://www.instagram.com/reel/REEL1/?igsh=abc' } });
 const reelPatched = await api('PATCH', `/giveaways/${reelG.json.id}`, { platforms: reelRules });
 const reelRule = igRules(reelPatched.json)[1];
-ok('rule post given as a link is saved as its media ID', reelPatched.status === 200 && JSON.stringify(reelRule?.options.posts) === '["reel"]' && /one post only/.test(reelRule.label), reelPatched.json);
+ok('Reel rule: link saved as the post, label names it', reelPatched.status === 200 && reelRule?.options.post?.id === '1002' && /instagram\.com\/reel\/REEL1/.test(reelRule.label), reelPatched.json);
+ok('main post rule kept its post', igRules(reelPatched.json)[0].options.post?.id === '1001', igRules(reelPatched.json));
 const rg = await svc.getOpenGiveaway();
 await svc.submitEntry({ giveaway: rg, discordId: 'r1', discordUsername: 'r1', values: { ig: 'r1_ig' } });
 await svc.submitEntry({ giveaway: rg, discordId: 'r2', discordUsername: 'r2', values: { ig: 'r2_ig' } });
 const rc = (ig: string, ref: string, mediaId: string) => svc.recordInstagramActivity({ giveaway: rg, action: 'comment', igUsername: ig, at: new Date(), sourceRef: ref, details: { mediaId } });
-await rc('r1_ig', 'rc1', 'main');
-await rc('r1_ig', 'rc2', 'reel');
-await rc('r2_ig', 'rc3', 'main');
-await rc('r2_ig', 'rc4', 'main');
+await rc('r1_ig', 'rc1', '1001');
+await rc('r1_ig', 'rc2', '1002');
+await rc('r2_ig', 'rc3', '1001');
+await rc('r2_ig', 'rc4', '1001');
 const rPeople = (await api('GET', `/giveaways/${reelG.json.id}/people`)).json;
 ok('main + Reel comments → 1 + 1 + 1 = 3', rPeople.find((p: any) => p.discord.id === 'r1').entries.total === 3, rPeople);
 ok('two main-post comments → 1 + 1 = 2 (no Reel bonus)', rPeople.find((p: any) => p.discord.id === 'r2').entries.total === 2, rPeople);

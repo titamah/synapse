@@ -29,13 +29,12 @@ A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: y
     },
     {
       "platform": "instagram",
-      "settings": {
-        "posts": ["https://www.instagram.com/p/…"],  // giveaway posts (one or more)
-        "autoIncludeHashtag": "#BBxGTAVI"             // optional: our posts with this hashtag join automatically
-      },
       "rules": [
         { "action": "follow",  "type": "required", "check": "winners" },
-        { "action": "comment", "type": "bonus", "weight": 1, "maxCount": 1, "options": { "requireTag": true } },
+        { "action": "comment", "type": "bonus", "weight": 1, "maxCount": 1,
+          "options": { "post": "https://www.instagram.com/p/…", "requireTag": true } },     // main post
+        { "action": "comment", "type": "bonus", "weight": 1, "maxCount": 1,
+          "options": { "post": "https://www.instagram.com/reel/…" } },                       // promo Reel
         { "action": "story",   "type": "bonus", "weight": 1, "maxCount": 1 },
         { "action": "story",   "type": "bonus", "weight": 1, "maxCount": 5,
           "windowStart": "2026-11-20T19:00:00-05:00", "windowEnd": "2026-11-20T22:30:00-05:00" }
@@ -59,7 +58,7 @@ A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: y
 | `maxCount` | bonus | Max counted per person |
 | `windowStart` / `windowEnd` | all | Only actions in this window count (always clamped to the giveaway's dates) |
 | `frequency` | bonus | At most once per `day` / `week` (Eastern) |
-| `options` | some | `requireTag` (comment must @tag a friend), `captionIncludes` (tagged post caption must contain text) |
+| `options` | some | `post` (comment: which post, required), `requireTag` (comment must @tag a friend), `captionIncludes` (tagged post caption must contain text) |
 
 ---
 
@@ -68,7 +67,7 @@ A giveaway is built the way you'd describe it out loud: *"Discord + Instagram: y
 | Platform | Settings | Actions |
 |---|---|---|
 | **Discord** | `channel` (where `/giveaway enter` works; **null** when no rule needs it) | `enter` (auto) · `member` (auto: in the server when entries are counted). *Later:* auto-enter every member without them doing anything |
-| **Instagram** | `posts[]`, `autoIncludeHashtag` | `follow` (**manual**) · `comment` · `story` · `tag` (someone's post that tags us; must tag us, `captionIncludes` can require a hashtag) |
+| **Instagram** | — (each comment rule names its post) | `follow` (**manual**) · `comment` (on the rule's `post`) · `story` · `tag` (someone's feed post that tags us, posted in the window; `captionIncludes` can require a hashtag) |
 | *Later: Posh, TikTok* | — | e.g. Posh `attend` (ticket scanned) |
 
 - **Manual vs. automatic is a property of the action** (follow = manual; the rest = auto). The dashboard never asks.

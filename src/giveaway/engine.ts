@@ -77,7 +77,7 @@ function satisfies(r: EngineRule, a: EngineActivity, g: EngineInput['giveaway'])
   if (t < start || t >= end) return false;
   if (r.options.requireTag && !a.details.taggedFriend) return false;
   if (r.options.captionIncludes && !(a.details.caption ?? '').toLowerCase().includes(r.options.captionIncludes.toLowerCase())) return false;
-  if (r.options.posts?.length && !(a.details.mediaId && r.options.posts.includes(a.details.mediaId))) return false;
+  if (r.options.post && r.options.post.id !== a.details.mediaId) return false;
   return true;
 }
 

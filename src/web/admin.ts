@@ -5,12 +5,11 @@ import { z } from 'zod';
 import { eq, inArray } from 'drizzle-orm';
 import { env } from '../config/environment.js';
 import { db } from '../db/client.js';
-import { ACTIONS, giveawayRules, giveaways, type FormField, type Platform, type PlatformSettings } from '../db/schema.js';
+import { ACTIONS, giveawayRules, giveaways, type FormField, type InstagramPost, type Platform, type PlatformSettings, type RuleOptions } from '../db/schema.js';
 import { toCsv } from '../lib/csv.js';
 import { channelName } from '../discord/channels.js';
 import { listRecentPosts, parseShortcode, resolvePost, type IgPost } from '../instagram/api.js';
 import { getSyncStatus, runCommentSync, runFinalSync } from '../instagram/sync.js';
-import { hasTagRules } from '../instagram/tags.js';
 import { renewTokenIfDue, tokenStatus } from '../instagram/token.js';
 import { announceExtended } from '../giveaway/announcements.js';
 import { resolveAnnouncements } from '../giveaway/announcementRules.js';
@@ -28,10 +27,11 @@ import {
   deleteGiveaway,
   discordChannel,
   findOverlap,
-  firstPostAt,
+  giveawayPosts,
   getGiveaway,
   getRules,
   isInstagramField,
+  readsInstagram,
   listGiveaways,
   participantCount,
   revokeOverride,
@@ -75,8 +75,9 @@ const ruleOptions = unset(
   z.object({
     requireTag: unset(z.boolean()),
     captionIncludes: unset(z.string().min(1).max(100)),
-    // comment rules: only comments on these posts (links or media IDs). Added to the giveaway's posts if needed.
-    posts: unset(z.array(z.string().min(1).max(500)).max(10)).transform(v => (v?.length ? v : undefined)),
+    // comment rules: the post whose comments count. A link (instagram.com/p/…, Reels too) or media ID;
+    // also accepts the post object this API returns.
+    post: unset(z.union([z.string().min(1).max(500), z.object({ id: z.string() }).passthrough().transform(p => p.id)])),
   }),
 );
 
@@ -104,11 +105,8 @@ const platformSchema = z.discriminatedUnion('platform', [
   }),
   z.object({
     platform: z.literal('instagram'),
-    settings: unset(z.object({
-      // Post links (instagram.com/p/…) or media IDs; also accepts the post objects this API returns.
-      posts: unset(z.array(z.union([z.string().min(1).max(500), z.object({ id: z.string() }).passthrough().transform(p => p.id)])).max(20)),
-      autoIncludeHashtag: z.string().regex(/^#\w{1,60}$/, 'a single hashtag like #BBxGTAVI').nullish(),
-    })),
+    // No writable settings: posts live on the comment rules. (sync, sent back, is ignored.)
+    settings: unset(z.object({}).passthrough()),
     rules: z.array(ruleSchema).min(1, 'each platform needs at least one rule'),
   }),
 ]);
@@ -199,18 +197,12 @@ const toV1Action = (a: string) => (({ comment: 'ig_comment', story: 'ig_story', 
 
 /** Current platforms of a saved giveaway, in input shape (for merging partial v1 edits). */
 function currentPlatforms(g: Giveaway, rules: EngineRule[]): PlatformInput[] {
-  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes, posts: r.options.posts } });
+  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes, post: r.options.post?.id } });
   const out: PlatformInput[] = [];
   const discord = rules.filter(r => r.platform === 'discord');
   if (discord.length) out.push({ platform: 'discord', settings: { channel: discordChannel(g) }, rules: discord.map(toInput) });
   const ig = rules.filter(r => r.platform === 'instagram');
-  if (ig.length || g.platformSettings.instagram) {
-    out.push({
-      platform: 'instagram',
-      settings: { posts: (g.platformSettings.instagram?.posts ?? []).map(p => p.id), autoIncludeHashtag: g.platformSettings.instagram?.autoIncludeHashtag ?? null },
-      rules: ig.map(toInput),
-    });
-  }
+  if (ig.length) out.push({ platform: 'instagram', settings: {}, rules: ig.map(toInput) });
   return out;
 }
 
@@ -227,9 +219,14 @@ function platformsFromV1(input: GiveawayInput, current: PlatformInput[] | null):
   const methods = input.entryMethods ?? (current ? [...(prevDiscord ? ['discord' as const] : []), ...(prevIg && !prevDiscord ? ['instagram' as const] : [])] : ['discord' as const]);
   const either = methods.includes('discord') && methods.includes('instagram');
 
-  const igRules: RuleInput[] = input.rules
-    ? input.rules.map(r => ({ id: r.id, action: V1_ACTION[r.action], type: 'bonus', weight: 1, min: 1, check: null, maxCount: r.maxCount, windowStart: r.windowStart, windowEnd: r.windowEnd, frequency: r.frequency, options: r.options }))
-    : (prevIg?.rules ?? []);
+  // v1 had one post for the whole giveaway: it goes on every comment rule.
+  const prevPost = prevIg?.rules.find(r => r.action === 'comment' && r.options?.post)?.options?.post;
+  const v1Post = input.igPost !== undefined ? (input.igPost ?? undefined) : prevPost;
+  const igRules: RuleInput[] = (
+    input.rules
+      ? input.rules.map(r => ({ id: r.id, action: V1_ACTION[r.action], type: 'bonus' as const, weight: 1, min: 1, check: null, maxCount: r.maxCount, windowStart: r.windowStart, windowEnd: r.windowEnd, frequency: r.frequency, options: r.options }))
+      : (prevIg?.rules ?? [])
+  ).map(r => (r.action === 'comment' ? { ...r, options: { requireTag: r.options?.requireTag, captionIncludes: r.options?.captionIncludes, post: v1Post } } : r));
   if (!methods.includes('discord') && igRules.length && !igRules.some(r => r.type === 'required')) igRules[0] = { ...igRules[0]!, type: 'required' };
 
   const out: PlatformInput[] = [];
@@ -243,10 +240,7 @@ function platformsFromV1(input: GiveawayInput, current: PlatformInput[] | null):
         : prevDiscord.rules;
     out.push({ platform: 'discord', settings: { channel: input.entryChannel !== undefined ? input.entryChannel : (prevDiscord?.settings?.channel ?? null) }, rules: discordRules });
   }
-  const posts = input.igPost !== undefined ? (input.igPost ? [input.igPost] : []) : (prevIg?.settings?.posts ?? []);
-  if (igRules.length || posts.length) {
-    out.push({ platform: 'instagram', settings: { posts, autoIncludeHashtag: prevIg?.settings?.autoIncludeHashtag ?? null }, rules: igRules });
-  }
+  if (igRules.length) out.push({ platform: 'instagram', settings: {}, rules: igRules });
   return out;
 }
 
@@ -260,7 +254,7 @@ type Checked = { error: string } | { formFields: FormField[] };
  * fields added and locked: when Discord "enter" is required and another platform is present,
  * the Discord form must collect that platform's username (it's how one person is linked).
  */
-function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: PlatformInput[]; formFields: FormField[] }): Checked {
+function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: PlatformInput[]; formFields: FormField[] }, requirePosts = true): Checked {
   if (!merged.startsAt || merged.endsAt <= merged.startsAt) return { error: 'endsAt must be after startsAt' };
   const seen = new Set<string>();
   for (const p of merged.platforms) {
@@ -270,7 +264,8 @@ function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: Pl
       if (!(ACTIONS[p.platform] as readonly string[]).includes(r.action)) return { error: `"${r.action}" isn't a ${p.platform} action (use ${ACTIONS[p.platform].join(', ')})` };
       if (r.windowStart && r.windowEnd && r.windowEnd <= r.windowStart) return { error: 'rule windowEnd must be after windowStart' };
       if (r.check && r.action !== 'follow') return { error: '"check" only applies to manual actions (follow)' };
-      if (r.options?.posts && r.action !== 'comment') return { error: '"posts" only applies to comment rules' };
+      if (r.options?.post && r.action !== 'comment') return { error: '"post" only applies to comment rules' };
+      if (requirePosts && r.action === 'comment' && !r.options?.post) return { error: 'comment rules need a post (options.post: the post\'s link)' };
     }
   }
   const discord = merged.platforms.find(p => p.platform === 'discord');
@@ -300,7 +295,7 @@ function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: Pl
 function platformsJson(g: Giveaway, rules: EngineRule[], sync: unknown) {
   return currentPlatforms(g, rules).map(p =>
     p.platform === 'instagram'
-      ? { platform: p.platform, settings: { posts: g.platformSettings.instagram?.posts ?? [], autoIncludeHashtag: g.platformSettings.instagram?.autoIncludeHashtag ?? null, sync }, rules: rulesJson(rules, 'instagram') }
+      ? { platform: p.platform, settings: { sync }, rules: rulesJson(rules, 'instagram') }
       : { platform: p.platform, settings: { channel: discordChannel(g) }, rules: rulesJson(rules, 'discord') },
   );
 }
@@ -313,7 +308,7 @@ async function giveawayJson(g: Giveaway, client?: Client) {
   const people = await computePeople(g, client);
   const eligible = people.filter(p => p.result.eligible);
   const sync = await getSyncStatus(g.id);
-  const firstPost = g.platformSettings.instagram?.posts?.[0];
+  const firstPost = (await giveawayPosts(g)).sort((a, b) => a.postedAt.getTime() - b.postedAt.getTime())[0];
   return {
     id: g.id,
     name: g.name,
@@ -365,7 +360,7 @@ async function giveawayJson(g: Giveaway, client?: Client) {
     entryChannel: discordChannel(g),
     igMediaId: firstPost?.id ?? null,
     igPermalink: firstPost?.permalink ?? null,
-    igPostedAt: firstPostAt(g),
+    igPostedAt: firstPost?.postedAt ?? null,
     rules: rules
       .filter(r => r.platform === 'instagram' && r.type === 'bonus' && r.action !== 'follow')
       .map(r => ({ ...r, action: toV1Action(r.action), description: describeRule(r) })),
@@ -412,22 +407,19 @@ async function lookupIgPost(value: string): Promise<{ post: IgPost; error?: unde
   }
 }
 
-type StoredPost = NonNullable<PlatformSettings['instagram']>['posts'][number];
-
 /** Same post? Matches a media ID, or a link by its short code (so share junk like ?igsh= doesn't matter). */
-const samePost = (p: StoredPost, ref: string) => p.id === ref || p.permalink === ref || (!!parseShortcode(ref) && parseShortcode(ref) === parseShortcode(p.permalink));
+const samePost = (p: InstagramPost, ref: string) => p.id === ref || p.permalink === ref || (!!parseShortcode(ref) && parseShortcode(ref) === parseShortcode(p.permalink));
 
 /**
- * Resolves the Instagram platform's post links/IDs, including posts named on comment rules (those
- * are added to the giveaway's posts so their comments get read). Reuses saved posts, so unchanged
- * ones need no API call. Returns the posts, and the platforms with rule posts as media IDs.
+ * Resolves the posts on comment rules (links or media IDs) to stored posts. Reuses ones already
+ * saved, so unchanged posts need no API call. Returns the posts, and the platforms with each rule's
+ * post as its media ID.
  */
-async function resolvePosts(platforms: PlatformInput[], existing: StoredPost[]) {
-  const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
-  if (!ig) return { posts: [] as StoredPost[], platforms };
-  const refs = [...(ig.settings?.posts ?? []), ...ig.rules.flatMap(r => r.options?.posts ?? [])];
-  const out: StoredPost[] = [];
-  for (const ref of refs) {
+async function resolvePosts(platforms: PlatformInput[], existing: InstagramPost[]) {
+  const ig = platforms.find(p => p.platform === 'instagram');
+  if (!ig) return { posts: [] as InstagramPost[], platforms };
+  const out: InstagramPost[] = [];
+  for (const ref of ig.rules.flatMap(r => (r.options?.post ? [r.options.post] : []))) {
     if (out.some(p => samePost(p, ref))) continue;
     const known = existing.find(p => samePost(p, ref));
     if (known) {
@@ -438,21 +430,20 @@ async function resolvePosts(platforms: PlatformInput[], existing: StoredPost[]) 
     if (found.error) return { error: found.error };
     if (!out.some(p => p.id === found.post.id)) out.push({ id: found.post.id, permalink: found.post.permalink, postedAt: found.post.postedAt });
   }
-  const idOf = (ref: string) => out.find(p => samePost(p, ref))!.id;
-  const rules = ig.rules.map(r => (r.options?.posts ? { ...r, options: { ...r.options, posts: [...new Set(r.options.posts.map(idOf))] } } : r));
-  return { posts: out, platforms: platforms.map(p => (p === ig ? { ...ig, rules } : p)) };
+  const rules = ig.rules.map(r => (r.options?.post ? { ...r, options: { ...r.options, post: out.find(p => samePost(p, r.options!.post!))!.id } } : r));
+  return { posts: out, platforms: platforms.map(p => (p === ig ? ({ ...ig, rules } as PlatformInput) : p)) };
 }
 
-function settingsFrom(platforms: PlatformInput[], posts: NonNullable<PlatformSettings['instagram']>['posts']): PlatformSettings {
+function settingsFrom(platforms: PlatformInput[]): PlatformSettings {
   const discord = platforms.find(p => p.platform === 'discord') as Extract<PlatformInput, { platform: 'discord' }> | undefined;
-  const ig = platforms.find(p => p.platform === 'instagram') as Extract<PlatformInput, { platform: 'instagram' }> | undefined;
   return {
     ...(discord ? { discord: { channel: discord.settings?.channel ?? null } } : {}),
-    ...(ig ? { instagram: { posts, autoIncludeHashtag: ig.settings?.autoIncludeHashtag ?? null } } : {}),
+    ...(platforms.some(p => p.platform === 'instagram') ? { instagram: {} } : {}),
   };
 }
 
-const ruleRows = (platforms: PlatformInput[]) =>
+/** Rules as stored. `posts` are the resolved posts, so each comment rule stores its post's link and date. */
+const ruleRows = (platforms: PlatformInput[], posts: InstagramPost[]) =>
   platforms.flatMap(p =>
     p.rules.map(r => ({
       id: r.id,
@@ -466,7 +457,11 @@ const ruleRows = (platforms: PlatformInput[]) =>
       windowStart: r.windowStart ?? null,
       windowEnd: r.windowEnd ?? null,
       frequency: r.type === 'required' ? null : (r.frequency ?? null),
-      options: r.options ?? {},
+      options: (() => {
+        const { post, ...rest } = r.options ?? {};
+        const stored = post ? posts.find(x => x.id === post) : undefined;
+        return { ...rest, ...(stored ? { post: stored } : {}) } as RuleOptions;
+      })(),
     })),
   );
 
@@ -546,7 +541,7 @@ export function createAdminRouter(client?: Client) {
           startsAt: input.startsAt,
           endsAt: input.endsAt,
           baseWeight: input.baseWeight ?? 1,
-          platformSettings: settingsFrom(platforms, resolved.posts),
+          platformSettings: settingsFrom(platforms),
           formFields: checked.formFields,
           reminderText: input.reminderText ?? null,
           maxParticipants: input.maxParticipants ?? null,
@@ -560,7 +555,7 @@ export function createAdminRouter(client?: Client) {
           claimHours: wc.claimHours ?? 12,
         })
         .returning();
-      await tx.insert(giveawayRules).values(ruleRows(platforms).map(({ id: _id, ...r }, i) => ({ ...r, giveawayId: created!.id, position: i + 1 })));
+      await tx.insert(giveawayRules).values(ruleRows(platforms, resolved.posts).map(({ id: _id, ...r }, i) => ({ ...r, giveawayId: created!.id, position: i + 1 })));
       return created!;
     });
     await audit(g.id, req.actor!, 'giveaway.created', { name: g.name, platforms: platforms.map(p => p.platform) });
@@ -586,27 +581,29 @@ export function createAdminRouter(client?: Client) {
       platforms,
       formFields: input.formFields ?? g.formFields,
     };
-    const checked = crossCheck(merged);
+    // Posts are required on comment rules the request sends; rules saved before (v1) are left alone.
+    const checked = crossCheck(merged, !!input.platforms);
     if ('error' in checked) return { ok: false, status: 400, error: checked.error } as const;
-    const ruleIds = ruleRows(platforms).filter(r => r.id).map(r => r.id!);
+    const ruleIds = platforms.flatMap(p => p.rules).filter(r => r.id).map(r => r.id!);
     if (ruleIds.some(id => !currentRules.some(c => c.id === id))) return { ok: false, status: 400, error: 'A rule id does not belong to this giveaway' } as const;
-    const resolved = await resolvePosts(platforms, g.platformSettings.instagram?.posts ?? []);
+    const saved = (await giveawayPosts(g)).map(p => ({ ...p, postedAt: p.postedAt.toISOString() }));
+    const resolved = await resolvePosts(platforms, saved);
     if ('error' in resolved) return { ok: false, status: resolved.error!.status, error: resolved.error!.message } as const;
-    return { ok: true, input, platforms: resolved.platforms, posts: resolved.posts, merged, formFields: checked.formFields, currentRules } as const;
+    return { ok: true, input, platforms: resolved.platforms, posts: resolved.posts, saved, merged, formFields: checked.formFields, currentRules } as const;
   }
 
   router.patch('/giveaways/:id', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
     const prep = await prepareEdit(g, req.body);
     if (!prep.ok) return void res.status(prep.status).json({ error: prep.error });
-    const { input, platforms, posts, merged, formFields, currentRules } = prep;
+    const { input, platforms, posts, saved, merged, formFields, currentRules } = prep;
 
     if ((input.startsAt || input.endsAt) && !g.closedAt) {
       const overlap = await findOverlap(merged.startsAt!, merged.endsAt, g.id);
       if (overlap) return void res.status(409).json({ error: `Overlaps with "${overlap.name}". Only one giveaway can run at a time.` });
     }
 
-    const newPost = posts.some(p => !(g.platformSettings.instagram?.posts ?? []).some(o => o.id === p.id));
+    const newPost = posts.some(p => !saved.some(o => o.id === p.id));
 
     const { platforms: _p, entryMethods: _m, entryChannel: _c, igPost: _i, rules: _r, formFields: _f, winners: _w, ...rest } = input;
     const settings = { ...rest, ...winnerColumns(input) };
@@ -614,12 +611,12 @@ export function createAdminRouter(client?: Client) {
       const changes = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== undefined));
       await tx
         .update(giveaways)
-        .set({ ...changes, formFields, platformSettings: settingsFrom(platforms, posts), updatedAt: new Date() })
+        .set({ ...changes, formFields, platformSettings: settingsFrom(platforms), updatedAt: new Date() })
         .where(eq(giveaways.id, g.id));
 
       // Rules are replaced by the list sent: matched by id, new ones added, missing ones removed.
       // Activity is never deleted, so a removed rule just stops counting (and can come back).
-      const rows = ruleRows(platforms);
+      const rows = ruleRows(platforms, posts);
       const keep = rows.filter(r => r.id).map(r => r.id!);
       const removed = currentRules.filter(c => !keep.includes(c.id)).map(c => c.id);
       if (removed.length) await tx.delete(giveawayRules).where(inArray(giveawayRules.id, removed));
@@ -646,7 +643,7 @@ export function createAdminRouter(client?: Client) {
     const prep = await prepareEdit(g, req.body);
     if (!prep.ok) return void res.status(prep.status).json({ error: prep.error });
     let tempId = -1;
-    const proposed: EngineRule[] = ruleRows(prep.platforms).map((r, i) => ({ ...r, id: r.id ?? tempId--, position: i + 1 }));
+    const proposed: EngineRule[] = ruleRows(prep.platforms, prep.posts).map((r, i) => ({ ...r, id: r.id ?? tempId--, position: i + 1 }));
     const previewG = { ...g, baseWeight: prep.input.baseWeight ?? g.baseWeight, startsAt: prep.merged.startsAt, endsAt: prep.merged.endsAt };
     const before = await computePeople(g, client);
     const after = await computePeople(previewG, client, proposed);
@@ -697,8 +694,8 @@ export function createAdminRouter(client?: Client) {
   // "Sync now": read the posts' comments and tagged posts immediately and return the result.
   router.post('/giveaways/:id/sync', requireActor, async (req: Req, res) => {
     const g = req.giveaway!;
-    if (!g.platformSettings.instagram?.posts?.length && !g.platformSettings.instagram?.autoIncludeHashtag && !(await hasTagRules(g))) {
-      return void res.status(400).json({ error: "Add the giveaway's Instagram post (or a tagged-post rule) first" });
+    if (!(await readsInstagram(g))) {
+      return void res.status(400).json({ error: 'Add a comment rule with a post, or a tagged-post rule, first' });
     }
     await runCommentSync(g, 'manual');
     res.json({ igSync: await getSyncStatus(g.id) });

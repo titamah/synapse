@@ -68,9 +68,19 @@ export const hasRule = (rules: EngineRule[], platform: Platform, action?: RuleAc
 export const takesDiscordEntries = (rules: EngineRule[]) => hasRule(rules, 'discord', 'enter');
 
 /** When the giveaway's first Instagram post went up (Story mentions count from then). */
-export function firstPostAt(g: Giveaway): Date | null {
-  const times = (g.platformSettings.instagram?.posts ?? []).map(p => new Date(p.postedAt).getTime()).filter(t => !Number.isNaN(t));
-  return times.length ? new Date(Math.min(...times)) : null;
+/** The Instagram posts whose comments count: the posts on the giveaway's comment rules. */
+export async function giveawayPosts(g: Giveaway): Promise<{ id: string; permalink: string; postedAt: Date }[]> {
+  const seen = new Map<string, { id: string; permalink: string; postedAt: Date }>();
+  for (const r of await getRules(g.id)) {
+    const p = r.platform === 'instagram' && r.action === 'comment' ? r.options.post : undefined;
+    if (p && !seen.has(p.id)) seen.set(p.id, { id: p.id, permalink: p.permalink, postedAt: new Date(p.postedAt) });
+  }
+  return [...seen.values()];
+}
+
+/** Does this giveaway read anything from Instagram (comments on its posts, or tagged posts)? */
+export async function readsInstagram(g: Giveaway) {
+  return (await getRules(g.id)).some(r => r.platform === 'instagram' && (r.action === 'tag' || (r.action === 'comment' && !!r.options.post)));
 }
 
 export const discordChannel = (g: Giveaway) => g.platformSettings.discord?.channel ?? null;

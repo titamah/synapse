@@ -48,8 +48,8 @@ function periodKey(frequency: 'day' | 'week', d: Date) {
 /**
  * Picks the rule an action should count under, or null if it earns nothing.
  * Candidates are rules for this action whose options are met and whose time window
- * (default: the whole giveaway, and never outside it) contains the action. The most specific rule wins
- * (one limited to the post the comment is on, then the narrowest window), then list order. A rule is skipped once this person hit its max, or already earned
+ * (default: the whole giveaway, and never outside it) contains the action. Comments only match rules for
+ * the post they're on. The most specific window wins, then list order. A rule is skipped once this person hit its max, or already earned
  * under it in the same day/week.
  */
 export function chooseRule(
@@ -62,16 +62,15 @@ export function chooseRule(
     .filter(r => r.action === ctx.action)
     .filter(r => !r.options.requireTag || ctx.taggedFriend)
     .filter(r => !r.options.captionIncludes || (ctx.caption ?? '').toLowerCase().includes(r.options.captionIncludes.toLowerCase()))
-    .filter(r => !r.options.posts?.length || (!!ctx.mediaId && r.options.posts.includes(ctx.mediaId)))
+    .filter(r => !r.options.post || r.options.post.id === ctx.mediaId)
     .map(r => {
       // A rule's window never reaches outside the giveaway itself (e.g. after it closed early).
       const start = new Date(Math.max((r.windowStart ?? giveawayWindow.start).getTime(), giveawayWindow.start.getTime()));
       const end = new Date(Math.min((r.windowEnd ?? giveawayWindow.end).getTime(), giveawayWindow.end.getTime()));
-      return { rule: r, start, end, length: end.getTime() - start.getTime(), scoped: r.options.posts?.length ? 0 : 1 };
+      return { rule: r, start, end, length: end.getTime() - start.getTime() };
     })
     .filter(c => ctx.at >= c.start && ctx.at < c.end)
-    // Most specific first: a rule for a particular post, then the narrowest window, then list order.
-    .sort((a, b) => a.scoped - b.scoped || a.length - b.length || a.rule.position - b.rule.position);
+    .sort((a, b) => a.length - b.length || a.rule.position - b.rule.position);
 
   for (const { rule } of candidates) {
     const earned = prior.filter(p => p.ruleId === rule.id);

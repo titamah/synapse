@@ -59,11 +59,11 @@ test('Stories count from the giveaway start (no post needed); before it they do 
   assert.equal(r.entries.bonus, 1);
 });
 
-test('Comment rule for one post: the Reel comment earns its own bonus, on top of the main post one', () => {
+test('Each comment rule counts its own post: main post + Reel = two bonuses', () => {
   const rules = [
     rule({ id: 40, platform: 'discord', action: 'enter', type: 'required' }),
-    rule({ id: 41, platform: 'instagram', action: 'comment', type: 'bonus', options: { requireTag: true } }),
-    rule({ id: 42, platform: 'instagram', action: 'comment', type: 'bonus', options: { posts: ['reel'] } }),
+    rule({ id: 41, platform: 'instagram', action: 'comment', type: 'bonus', options: { requireTag: true, post: { id: 'main', permalink: 'https://www.instagram.com/p/MAIN/', postedAt: '2026-10-19T20:00:00Z' } } }),
+    rule({ id: 42, platform: 'instagram', action: 'comment', type: 'bonus', options: { post: { id: 'reel', permalink: 'https://www.instagram.com/reel/REEL/', postedAt: '2026-10-22T20:00:00Z' } } }),
   ];
   const enter = act('discord', 'enter', '2026-10-20T10:00:00-04:00');
   const onMain = act('instagram', 'comment', '2026-10-20T11:00:00-04:00', { taggedFriend: true, mediaId: 'main' });
@@ -71,10 +71,9 @@ test('Comment rule for one post: the Reel comment earns its own bonus, on top of
   const both = run({ rules, activities: [enter, onMain, onReel] });
   assert.deepEqual(both.breakdown.map(b => b.ruleId), [41, 42]);
   assert.equal(both.entries.total, 3);
-  // Two Reel comments: one goes to the Reel rule, the other (tagged) to the any-post rule.
+  // Reel comments never count for the main post rule, and the other way around.
   const reelTwice = run({ rules, activities: [enter, onReel, act('instagram', 'comment', '2026-10-24T11:00:00-04:00', { taggedFriend: true, mediaId: 'reel' })] });
-  assert.equal(reelTwice.entries.total, 3);
-  // A main-post comment never counts for the Reel rule.
+  assert.deepEqual(reelTwice.breakdown.map(b => b.ruleId), [42]);
   const mainTwice = run({ rules, activities: [enter, onMain, act('instagram', 'comment', '2026-10-21T11:00:00-04:00', { taggedFriend: true, mediaId: 'main' })] });
   assert.deepEqual(mainTwice.breakdown.map(b => b.ruleId), [41]);
 });

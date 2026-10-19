@@ -96,9 +96,9 @@ A **discriminated union** on `platform`. Each kind has its own `settings` and al
 ### InstagramSettings
 | Field | Type | Meaning |
 |---|---|---|
-| `posts` | `InstagramPost[]` (write: links or media IDs) | The giveaway's posts. Comments on any of them count. Can be set any time; comments count from `startsAt`. |
-| `autoIncludeHashtag` | string (`#word`), *nullable* | Our posts whose caption contains this hashtag join `posts` automatically. |
 | `sync` | `InstagramSync` (read-only) | Last comment/tag read: `lastRunAt`, `lastSuccessAt`, `lastError` (show a warning if set), `lastResult`. |
+
+Nothing to set here: posts live on the comment rules (`options.post`).
 
 `InstagramPost` (read): `{ "id", "permalink", "postedAt" }` (thumbnails expire, so get them from `GET /instagram/posts`). On write, send a link (`https://www.instagram.com/p/…`, Reels included) or a media ID.
 
@@ -137,7 +137,7 @@ One shape for every rule. Which fields apply depends on `type` and `action`.
 | `options` | object | some actions | See the actions table. |
 | `description` | string | — | Read-only, human-readable summary. |
 
-**Counting:** an action that satisfies a required rule is part of the base entry and doesn't also earn a bonus. Bonus actions go to the most specific matching rule that still has room (one limited to the comment's post first, then the narrowest window), then list order. Example: "comment, max 1" plus "comment on the Reel, max 1" gives +2 to someone who comments on the main post and the Reel.
+**Counting:** an action that satisfies a required rule is part of the base entry and doesn't also earn a bonus. Bonus actions go to the most specific matching rule (narrowest window) that still has room, then list order. Each comment rule counts comments on its own post, so "comment on the main post, max 1" plus "comment on the Reel, max 1" gives +2 to someone who comments on both.
 
 ### Actions
 | Platform | `action` | Detected | `options` | Meaning |
@@ -145,9 +145,9 @@ One shape for every rule. Which fields apply depends on `type` and `action`.
 | discord | `enter` | auto | — | Ran `/giveaway enter` and submitted the form. Creates the form and command. |
 | discord | `member` | auto | — | Is in the server when entries are counted (dashboard, export, draw). |
 | instagram | `follow` | **manual** | — | Follows @BostonBlerds. The bot can't see follows; an admin confirms (`check`). |
-| instagram | `comment` | auto | `requireTag: boolean` (must @mention someone other than us or the commenter); `posts: string[]` (optional: only comments on these posts count; links or media IDs, saved as IDs and added to the giveaway's posts) | Commented on a giveaway post. Deleted or hidden comments stop counting. |
+| instagram | `comment` | auto | `post` (**required**: the post whose comments count; write a link or media ID, read an `InstagramPost`); `requireTag: boolean` (must @mention someone other than us or the commenter) | Commented on that post. Deleted or hidden comments stop counting. |
 | instagram | `story` | auto | — | Mentioned @BostonBlerds in their Story (from `startsAt`; no post needed). |
-| instagram | `tag` | auto | `captionIncludes: string` (case-insensitive text the caption must contain, e.g. a hashtag) | Posted something that tags @BostonBlerds. Private accounts can't be seen. Deleted posts stop counting. |
+| instagram | `tag` | auto | `captionIncludes: string` (case-insensitive text the caption must contain, e.g. a hashtag) | Posted to their feed (photo, carousel or Reel) and tagged @BostonBlerds with "Tag people", during the rule's window (by when the post went up). Not Story mentions (`story`) or caption-only @mentions. Private accounts can't be seen. Deleted or untagged posts stop counting. |
 
 **Eligibility:** a person is eligible when every **required** rule on every platform is met and they aren't disqualified. If the giveaway has **no required rules**, any counted action makes them eligible (an "OR" giveaway).
 

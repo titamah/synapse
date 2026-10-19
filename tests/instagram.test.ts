@@ -8,7 +8,6 @@ process.env.DATABASE_URL ??= 'postgresql://x@localhost:1/x';
 
 const { parseShortcode, toComment } = await import('../src/instagram/api.js');
 const { tagsAFriend } = await import('../src/instagram/comments.js');
-const { hasHashtag } = await import('../src/instagram/hashtag.js');
 
 test('parseShortcode: post, reel, share params, profile-style links', () => {
   assert.equal(parseShortcode('https://www.instagram.com/p/DeU57Lun84l/'), 'DeU57Lun84l');
@@ -29,11 +28,4 @@ test('toComment: real Instagram shape (username under from, sticker comments wit
   assert.deepEqual(c, { id: '1', username: 'faith.fit.blerd', text: '', timestamp: '2026-10-13T21:53:05+0000', hidden: false });
   assert.equal(toComment({ id: '2', text: 'hi', timestamp: 't' })?.username ?? null, null);
   assert.equal(toComment({ id: '3', text: 'hi', timestamp: 't', username: 'old_shape' })?.username, 'old_shape');
-});
-
-test('hasHashtag: exact tag, any case, not a longer tag', () => {
-  assert.equal(hasHashtag('Win GTA VI! #BBxGTA', '#bbxgta'), true);
-  assert.equal(hasHashtag('#bbxgta!', '#BBxGTA'), true);
-  assert.equal(hasHashtag('#BBxGTAVI', '#BBxGTA'), false);
-  assert.equal(hasHashtag(null, '#BBxGTA'), false);
 });
