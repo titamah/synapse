@@ -190,6 +190,7 @@ ok('comment w/o tag → recorded', (await record('comment', 'alex.plays', 'c1', 
 ok('comment with tag → recorded', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true, mediaId: '1000' })) === 'recorded');
 ok('same comment again → duplicate', (await record('comment', 'alex.plays', 'c2', { taggedFriend: true, mediaId: '1000' })) === 'duplicate');
 for (let i = 1; i <= 7; i++) await record('story', 'alex.plays', `s${i}`);
+ok('comment from before the start → not recorded', (await svc.recordInstagramActivity({ giveaway: open, action: 'comment', igUsername: 'old_fan', at: new Date(now - 2 * 60 * 60e3), sourceRef: 'c-old', details: { mediaId: '1000' } })) === 'before-start');
 ok('own account never recorded', (await record('story', 'bostonblerds', 'own1')) === 'own-account');
 ok('story from someone not entered yet → recorded', (await record('story', 'newfan', 'n1')) === 'recorded');
 

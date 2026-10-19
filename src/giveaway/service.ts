@@ -365,7 +365,7 @@ export async function setEntrantRevoked(giveawayId: number, entrantId: number, a
 // ---------------------------------------------------------------------------
 // Activity log
 
-export type RecordResult = 'recorded' | 'duplicate' | 'own-account' | 'full';
+export type RecordResult = 'recorded' | 'duplicate' | 'own-account' | 'before-start' | 'full';
 
 /**
  * Records one Instagram action in the activity log (safe to repeat; deduplicated by sourceRef)
@@ -381,6 +381,9 @@ export async function recordInstagramActivity(input: {
 }): Promise<RecordResult> {
   if (input.igUsername === OWN_IG_HANDLE) return 'own-account';
   const g = input.giveaway;
+  // Older comments on a giveaway post can never count (no rule reaches before the start), so they
+  // aren't recorded: otherwise everyone who ever commented would show up as a person.
+  if (input.at < (g.startsAt ?? g.createdAt)) return 'before-start';
 
   const inserted = await db
     .insert(activities)
