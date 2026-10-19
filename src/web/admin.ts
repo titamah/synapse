@@ -25,7 +25,7 @@ import {
   closeGiveaway,
   computePeople,
   deleteGiveaway,
-  discordChannel,
+  enterChannels,
   findOverlap,
   giveawayPosts,
   getGiveaway,
@@ -78,6 +78,8 @@ const ruleOptions = unset(
     // comment rules: the post whose comments count. A link (instagram.com/p/…, Reels too) or media ID;
     // also accepts the post object this API returns.
     post: unset(z.union([z.string().min(1).max(500), z.object({ id: z.string() }).passthrough().transform(p => p.id)])),
+    // enter rules: the channel NAME where /giveaway enter counts. "#GTA-Giveaway" is saved as "gta-giveaway".
+    channel: unset(z.string().max(100).transform(v => channelName(v) || undefined)),
   }),
 );
 
@@ -95,13 +97,20 @@ const ruleSchema = z.object({
   options: ruleOptions,
 });
 type RuleInput = z.infer<typeof ruleSchema>;
+type RuleOpts = NonNullable<RuleInput['options']>;
+/** Rule options with every key present (what the parsed schema produces). */
+const opts = (o: Partial<RuleOpts> = {}): RuleOpts => ({ requireTag: o.requireTag, captionIncludes: o.captionIncludes, post: o.post, channel: o.channel });
 
 const platformSchema = z.discriminatedUnion('platform', [
   z.object({
     platform: z.literal('discord'),
-    // Channel NAME; a leading # and capitals are fine ("#GTA-Giveaway" is saved as "gta-giveaway").
-    settings: unset(z.object({ channel: z.string().max(100).nullish().transform(v => (typeof v === 'string' ? channelName(v) || null : v)) })),
+    // No writable settings: each enter rule has its channel. A `channel` here (older clients) is put
+    // on enter rules that don't have one.
+    settings: unset(z.object({ channel: unset(z.string().max(100).transform(v => channelName(v) || undefined)) }).passthrough()),
     rules: z.array(ruleSchema).min(1, 'each platform needs at least one rule'),
+  }).transform(p => {
+    const fallback = p.settings?.channel;
+    return { ...p, settings: {}, rules: fallback ? p.rules.map(r => (r.action === 'enter' && !r.options?.channel ? { ...r, options: opts({ ...r.options, channel: fallback }) } : r)) : p.rules };
   }),
   z.object({
     platform: z.literal('instagram'),
@@ -197,10 +206,10 @@ const toV1Action = (a: string) => (({ comment: 'ig_comment', story: 'ig_story', 
 
 /** Current platforms of a saved giveaway, in input shape (for merging partial v1 edits). */
 function currentPlatforms(g: Giveaway, rules: EngineRule[]): PlatformInput[] {
-  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes, post: r.options.post?.id } });
+  const toInput = (r: EngineRule): RuleInput => ({ ...r, check: r.check ?? null, options: { requireTag: r.options.requireTag, captionIncludes: r.options.captionIncludes, post: r.options.post?.id, channel: r.options.channel } });
   const out: PlatformInput[] = [];
   const discord = rules.filter(r => r.platform === 'discord');
-  if (discord.length) out.push({ platform: 'discord', settings: { channel: discordChannel(g) }, rules: discord.map(toInput) });
+  if (discord.length) out.push({ platform: 'discord', settings: {}, rules: discord.map(toInput) });
   const ig = rules.filter(r => r.platform === 'instagram');
   if (ig.length) out.push({ platform: 'instagram', settings: {}, rules: ig.map(toInput) });
   return out;
@@ -224,21 +233,24 @@ function platformsFromV1(input: GiveawayInput, current: PlatformInput[] | null):
   const v1Post = input.igPost !== undefined ? (input.igPost ?? undefined) : prevPost;
   const igRules: RuleInput[] = (
     input.rules
-      ? input.rules.map(r => ({ id: r.id, action: V1_ACTION[r.action], type: 'bonus' as const, weight: 1, min: 1, check: null, maxCount: r.maxCount, windowStart: r.windowStart, windowEnd: r.windowEnd, frequency: r.frequency, options: r.options }))
+      ? input.rules.map(r => ({ id: r.id, action: V1_ACTION[r.action], type: 'bonus' as const, weight: 1, min: 1, check: null, maxCount: r.maxCount, windowStart: r.windowStart, windowEnd: r.windowEnd, frequency: r.frequency, options: opts(r.options) }))
       : (prevIg?.rules ?? [])
-  ).map(r => (r.action === 'comment' ? { ...r, options: { requireTag: r.options?.requireTag, captionIncludes: r.options?.captionIncludes, post: v1Post } } : r));
+  ).map(r => (r.action === 'comment' ? { ...r, options: opts({ ...r.options, post: v1Post }) } : r));
   if (!methods.includes('discord') && igRules.length && !igRules.some(r => r.type === 'required')) igRules[0] = { ...igRules[0]!, type: 'required' };
 
   const out: PlatformInput[] = [];
   if (methods.includes('discord')) {
+    // v1 had one entry channel: it goes on the enter rule(s).
+    const prevChannel = prevDiscord?.rules.find(r => r.action === 'enter' && r.options?.channel)?.options?.channel;
+    const channel = input.entryChannel !== undefined ? (input.entryChannel ?? undefined) : prevChannel;
     const discordRules: RuleInput[] =
       input.entryMethods || !prevDiscord
         ? [
-            { id: undefined, action: 'enter', type: either ? 'bonus' : 'required', weight: 1, min: 1, check: null, maxCount: 1, options: undefined },
+            { id: undefined, action: 'enter', type: either ? 'bonus' : 'required', weight: 1, min: 1, check: null, maxCount: 1, options: opts({ channel }) },
             ...(either ? [] : [{ id: undefined, action: 'member' as const, type: 'required' as const, weight: 1, min: 1, check: null, maxCount: 1, options: undefined }]),
           ]
-        : prevDiscord.rules;
-    out.push({ platform: 'discord', settings: { channel: input.entryChannel !== undefined ? input.entryChannel : (prevDiscord?.settings?.channel ?? null) }, rules: discordRules });
+        : prevDiscord.rules.map(r => (r.action === 'enter' ? { ...r, options: opts({ ...r.options, channel }) } : r));
+    out.push({ platform: 'discord', settings: {}, rules: discordRules });
   }
   if (igRules.length) out.push({ platform: 'instagram', settings: {}, rules: igRules });
   return out;
@@ -266,13 +278,14 @@ function crossCheck(merged: { startsAt: Date | null; endsAt: Date; platforms: Pl
       if (r.check && r.action !== 'follow') return { error: '"check" only applies to manual actions (follow)' };
       if (r.options?.post && r.action !== 'comment') return { error: '"post" only applies to comment rules' };
       if (requirePosts && r.action === 'comment' && !r.options?.post) return { error: 'comment rules need a post (options.post: the post\'s link)' };
+      if (r.options?.channel && r.action !== 'enter') return { error: '"channel" only applies to enter rules' };
+      if (r.action === 'enter' && !r.options?.channel) return { error: 'enter rules need a channel (options.channel: the channel name)' };
     }
   }
   const discord = merged.platforms.find(p => p.platform === 'discord');
   const entersOnDiscord = !!discord?.rules.some(r => r.action === 'enter');
-  if (entersOnDiscord && !(discord as Extract<PlatformInput, { platform: 'discord' }>).settings?.channel) {
-    return { error: 'Discord "enter" needs a channel (settings.channel)' };
-  }
+  const channels = discord?.rules.filter(r => r.action === 'enter').map(r => r.options!.channel!) ?? [];
+  if (new Set(channels).size !== channels.length) return { error: 'each enter rule needs its own channel' };
 
   let formFields = [...merged.formFields];
   const ids = formFields.map(f => f.id);
@@ -296,7 +309,7 @@ function platformsJson(g: Giveaway, rules: EngineRule[], sync: unknown) {
   return currentPlatforms(g, rules).map(p =>
     p.platform === 'instagram'
       ? { platform: p.platform, settings: { sync }, rules: rulesJson(rules, 'instagram') }
-      : { platform: p.platform, settings: { channel: discordChannel(g) }, rules: rulesJson(rules, 'discord') },
+      : { platform: p.platform, settings: {}, rules: rulesJson(rules, 'discord') },
   );
 }
 
@@ -357,7 +370,7 @@ async function giveawayJson(g: Giveaway, client?: Client) {
     defaultWinnerMessage: DEFAULT_WINNER_MESSAGE,
     claimHours: g.claimHours,
     entryMethods: [...(takesDiscordEntries(rules) ? ['discord'] : []), ...(rules.some(r => r.platform === 'instagram' && r.type === 'required') && !takesDiscordEntries(rules) ? ['instagram'] : [])],
-    entryChannel: discordChannel(g),
+    entryChannel: enterChannels(g)[0] ?? null,
     igMediaId: firstPost?.id ?? null,
     igPermalink: firstPost?.permalink ?? null,
     igPostedAt: firstPost?.postedAt ?? null,
@@ -437,7 +450,7 @@ async function resolvePosts(platforms: PlatformInput[], existing: InstagramPost[
 function settingsFrom(platforms: PlatformInput[]): PlatformSettings {
   const discord = platforms.find(p => p.platform === 'discord') as Extract<PlatformInput, { platform: 'discord' }> | undefined;
   return {
-    ...(discord ? { discord: { channel: discord.settings?.channel ?? null } } : {}),
+    ...(discord ? { discord: { channels: discord.rules.filter(r => r.action === 'enter').map(r => r.options!.channel!) } } : {}),
     ...(platforms.some(p => p.platform === 'instagram') ? { instagram: {} } : {}),
   };
 }

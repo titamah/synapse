@@ -23,7 +23,8 @@ export type FormField = {
 
 /** Per-platform settings on a giveaway. A platform is "on" when the giveaway has rules for it. */
 export type PlatformSettings = {
-  discord?: { channel: string | null } | undefined;
+  /** Present when Discord counts. `channels`: where /giveaway enter works, copied from the enter rules on save. */
+  discord?: { channels: string[] } | undefined;
   /** Present when Instagram counts. Posts live on the comment rules. */
   instagram?: Record<string, never> | undefined;
 };
@@ -112,6 +113,8 @@ export type RuleOptions = {
   captionIncludes?: string | undefined;
   /** comment: the post whose comments count. */
   post?: InstagramPost | undefined;
+  /** enter: the channel (name) where /giveaway enter counts for this rule. */
+  channel?: string | undefined;
 };
 
 /**

@@ -5,7 +5,7 @@ How the admin dashboard (admin.bostonblerds.com) talks to Synapse to run giveawa
 
 ---
 
-# Part 1: Using the API
+# Using the API
 
 ## Basics
 
@@ -90,8 +90,8 @@ await fetch('https://api.bostonblerds.com/admin/giveaways', {
   "startsAt": "2026-10-19T16:00:00-04:00",
   "endsAt": "2026-11-20T22:30:00-05:00",
   "platforms": [
-    { "platform": "discord", "settings": { "channel": "gta-giveaway" }, "rules": [
-      { "action": "enter",  "type": "required" },
+    { "platform": "discord", "rules": [
+      { "action": "enter",  "type": "required", "options": { "channel": "gta-giveaway" } },
       { "action": "member", "type": "required" }
     ] },
     { "platform": "instagram", "rules": [
@@ -184,11 +184,11 @@ CSV files, calculated on the server the same way as the dashboard and draws. Fil
 - **[Extend]** on countdown and 99%-capacity updates lets admins add hours or spots from Discord. A giveaway that filled up or ran out of time reopens; one closed early stays closed.
 - Right-click an update → **Apps → Post to giveaway channel** reposts it in the giveaway's channel.
 - `/admin giveaway timer` posts a live countdown. `/admin` is hidden from members.
-- `/giveaway` only exists while a giveaway with a Discord `enter` rule is open, and only works in its channel.
+- `/giveaway` only exists while a giveaway with a Discord `enter` rule is open, and only works in its enter rules' channels.
 
 ---
 
-# Part 2: Objects
+# Objects
 
 **Contents:** [Giveaway](#giveaway) · [Platform](#platform) · [Rule](#rule) · [Actions](#actions) · [FormField](#formfield) · [Announcements](#announcements) · [WinnerSettings](#winnersettings) · [Winner](#winner) · [Person](#person) · [Override](#override) · [Preview](#preview) · [Stats](#stats) · [InstagramSync](#instagramsync)
 
@@ -251,9 +251,9 @@ CSV files, calculated on the server the same way as the dashboard and draws. Fil
 
 **Checked on save** (`400` with a message if not):
 - Every platform has at least 1 rule, and every rule's `action` belongs to its platform.
-- Discord `enter` needs `settings.channel`.
+- Every `enter` rule has a `channel`, and no two `enter` rules share one.
 - Every `comment` rule has a `post`, and it's one of @BostonBlerds' posts.
-- `check` is only for `follow`; `post` is only for `comment`.
+- `check` is only for `follow`; `post` is only for `comment`; `channel` is only for `enter`.
 - Rule windows end after they start.
 - With Discord `enter` and Instagram both present, the form gets a required, locked Instagram account field (added if missing).
 - At most 5 form fields, unique ids, one Instagram account field.
@@ -264,17 +264,15 @@ CSV files, calculated on the server the same way as the dashboard and draws. Fil
 Each entry in `platforms` is one of these, told apart by `platform`:
 
 ```jsonc
-{ "platform": "discord",   "settings": { "channel": "gta-giveaway" }, "rules": [ /* Rule */ ] }
+{ "platform": "discord",   "settings": {}, "rules": [ /* Rule */ ] }
 { "platform": "instagram", "settings": { "sync": { /* read-only */ } }, "rules": [ /* Rule */ ] }
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
 | `platform` | `"discord"` \| `"instagram"` | Which platform. |
-| `settings` | object | Discord: `channel`. Instagram: nothing to set; `sync` is read-only ([InstagramSync](#instagramsync)). |
+| `settings` | object | Nothing to set: what an action needs lives on its rule (`enter` → `channel`, `comment` → `post`). Instagram returns `sync`, read-only ([InstagramSync](#instagramsync)). |
 | `rules` | `Rule[]` (1+) | What counts on this platform. |
-
-**Discord `channel`** (string, *nullable*): the channel **name** where `/giveaway enter` works. `#` and capitals are stripped (`#GTA-Giveaway` → `gta-giveaway`). Required when there's an `enter` rule.
 
 ## Rule
 
@@ -333,7 +331,7 @@ One shape for every rule. Which fields matter depends on `type` and `action`.
 
 | Platform | `action` | Detected | `options` | Counts when… |
 |---|---|---|---|---|
-| discord | `enter` | auto | — | They run `/giveaway enter` in the channel and submit the form. This rule creates the command and form. |
+| discord | `enter` | auto | `channel` (**required**): the channel **name** where it counts. `#` and capitals are stripped (`#GTA-Giveaway` → `gta-giveaway`). | They run `/giveaway enter` in that channel and submit the form. A giveaway can have several `enter` rules, one per channel: `/giveaway enter` works in all of them, and each rule counts entries made in its own channel (e.g. required in #gta-giveaway, +1 bonus in #general). Entering again in the same channel just updates their answers. Having an `enter` rule creates the command and form. |
 | discord | `member` | auto | — | They're in the Discord server when entries are counted (dashboard, export, draw). |
 | instagram | `follow` | **manual** | — | They follow @BostonBlerds. The bot can't see follows; an admin confirms (see `check`). |
 | instagram | `comment` | auto | `post` (**required**): the post whose comments count. Send a link or media ID; returned as `{ id, permalink, postedAt }`. `requireTag` (boolean): the comment must @mention someone other than us or the commenter. | They comment (or reply) on that post. Deleted or hidden comments stop counting. |
@@ -504,7 +502,7 @@ Returned in a Person as `{ id, kind, ruleId, label, weight, reason, by, at }`.
 ## Old v1 fields (deprecated)
 
 Still accepted so the current dashboard keeps working; they'll be removed once it's updated.
-- **Accepted and translated:** `entryMethods`, `entryChannel`, `igPost` (put on every comment rule), flat `rules` (`ig_comment`, `ig_story`, `ig_tag`), `ig_username` form fields, flat winner fields (`winnerCount`, `winnerSelect`, `winnerNotify`, `notifyDelayMinutes`, `winnerMessage`, `claimHours`; the `winners` object wins if both are sent), `{ entrantId }` when picking.
+- **Accepted and translated:** `entryMethods`, `entryChannel` and Discord `settings.channel` (put on `enter` rules without a channel), `igPost` (put on every comment rule), flat `rules` (`ig_comment`, `ig_story`, `ig_tag`), `ig_username` form fields, flat winner fields (`winnerCount`, `winnerSelect`, `winnerNotify`, `notifyDelayMinutes`, `winnerMessage`, `claimHours`; the `winners` object wins if both are sent), `{ entrantId }` when picking.
 - **Old routes:** `GET /entrants`, `POST /bonuses` (= a manual entry), `DELETE /bonuses/:id`, `/entrants/:id/disqualify` and `/restore`, `POST /winner`.
-- **Extra response fields:** `entryMethods`, `entryChannel`, `igMediaId`, `igPermalink`, `igPostedAt`, flat `rules`, flat winner fields, `defaultWinnerMessage`, `discordEntrantCount`, `igSync`.
+- **Extra response fields:** `entryMethods`, `entryChannel` (the first entry channel), `igMediaId`, `igPermalink`, `igPostedAt`, flat `rules`, flat winner fields, `defaultWinnerMessage`, `discordEntrantCount`, `igSync`.
 - **Breaking:** `winners` used to be the list of picks. It's now the settings object; picks are in `winners.history`.

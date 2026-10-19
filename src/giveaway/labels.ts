@@ -16,6 +16,7 @@ export function ruleLabel(r: Pick<EngineRule, 'platform' | 'action' | 'options'>
   let label = `${PLATFORM_LABELS[r.platform] ?? r.platform}: ${ACTION_LABELS[`${r.platform}:${r.action}`] ?? r.action}`;
   if (r.options.requireTag) label += ' (tagging a friend)';
   if (r.options.captionIncludes) label += ` (caption includes "${r.options.captionIncludes}")`;
+  if (r.options.channel) label += ` in #${r.options.channel}`;
   if (r.options.post) label += ` (${r.options.post.permalink.replace(/^https?:\/\/(www\.)?/, '').replace(/[?#].*$/, '')})`;
   return label;
 }

@@ -1,7 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
 import { channelName } from '../discord/channels.js';
 import { formatDuration } from './announcementRules.js';
-import { discordChannel, type Giveaway } from './service.js';
+import { enterChannels, type Giveaway } from './service.js';
 
 const YELLOW = 0xffff00;
 const BLUE = 0x0088ff;
@@ -22,10 +22,10 @@ function base(g: Giveaway) {
 }
 
 function enterLine(g: Giveaway) {
-  // A Discord channel means /giveaway enter exists; Instagram settings mean Instagram counts.
-  const channel = discordChannel(g);
-  const discord = `\`/giveaway enter\`${channel ? ` in #${channelName(channel)}` : ''}`;
-  const ways = [channel && `with ${discord}`, g.platformSettings.instagram && 'on Instagram (see @bostonblerds for how)'].filter(Boolean);
+  // Entry channels mean /giveaway enter exists; Instagram settings mean Instagram counts.
+  const channels = enterChannels(g);
+  const discord = `\`/giveaway enter\` in ${channels.map(c => `#${channelName(c)}`).join(' or ')}`;
+  const ways = [channels.length && `with ${discord}`, g.platformSettings.instagram && 'on Instagram (see @bostonblerds for how)'].filter(Boolean);
   if (!ways.length) return 'Members of the Boston Blerds Discord are entered automatically.';
   return `Enter ${ways.join(', or ')}.`;
 }

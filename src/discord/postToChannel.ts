@@ -7,7 +7,7 @@ import {
   type MessageContextMenuCommandInteraction,
 } from 'discord.js';
 import { GIVEAWAY_FOOTER } from '../giveaway/embeds.js';
-import { discordChannel, getGiveaway } from '../giveaway/service.js';
+import { enterChannels, getGiveaway } from '../giveaway/service.js';
 import { isAdmin } from '../lib/permissions.js';
 import { channelName, textChannelByName } from './channels.js';
 
@@ -32,7 +32,8 @@ export async function handlePostToChannel(interaction: MessageContextMenuCommand
     return;
   }
   const g = await getGiveaway(Number(id));
-  const entryChannel = g ? discordChannel(g) : null;
+  // The first entry channel is the giveaway's main channel.
+  const entryChannel = g ? (enterChannels(g)[0] ?? null) : null;
   if (!entryChannel) {
     await interaction.reply({ content: "This giveaway doesn't have an entry channel set.", flags: ephemeral });
     return;

@@ -25,7 +25,7 @@ export type EngineActivity = {
   platform: Platform;
   action: RuleAction;
   at: Date;
-  details: { taggedFriend?: boolean; caption?: string; mediaId?: string };
+  details: { taggedFriend?: boolean; caption?: string; mediaId?: string; channel?: string };
 };
 
 export type EngineOverride =
@@ -78,6 +78,7 @@ function satisfies(r: EngineRule, a: EngineActivity, g: EngineInput['giveaway'])
   if (r.options.requireTag && !a.details.taggedFriend) return false;
   if (r.options.captionIncludes && !(a.details.caption ?? '').toLowerCase().includes(r.options.captionIncludes.toLowerCase())) return false;
   if (r.options.post && r.options.post.id !== a.details.mediaId) return false;
+  if (r.options.channel && r.options.channel !== a.details.channel) return false;
   return true;
 }
 
@@ -127,6 +128,7 @@ export function evaluatePerson(input: EngineInput): EngineResult {
         ...(a.details.taggedFriend !== undefined ? { taggedFriend: a.details.taggedFriend } : {}),
         ...(a.details.caption !== undefined ? { caption: a.details.caption } : {}),
         ...(a.details.mediaId !== undefined ? { mediaId: a.details.mediaId } : {}),
+        ...(a.details.channel !== undefined ? { channel: a.details.channel } : {}),
       },
       { start: g.start, end: g.end },
       prior,

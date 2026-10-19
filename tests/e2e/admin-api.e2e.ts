@@ -59,7 +59,7 @@ await pool.query(`INSERT INTO bonuses (giveaway_id, ig_username, type, source, s
 const almostDir = path.join(scratch, 'drizzle-almost');
 fs.mkdirSync(path.join(almostDir, 'meta'), { recursive: true });
 const fullJournal = JSON.parse(fs.readFileSync(`${repo}/drizzle/meta/_journal.json`, 'utf8'));
-const almost = { ...fullJournal, entries: fullJournal.entries.filter((e: any) => e.tag !== '0015_rule_posts') };
+const almost = { ...fullJournal, entries: fullJournal.entries.slice(0, fullJournal.entries.findIndex((e: any) => e.tag === '0015_rule_posts')) };
 fs.writeFileSync(path.join(almostDir, 'meta/_journal.json'), JSON.stringify(almost));
 for (const e of almost.entries) fs.copyFileSync(`${repo}/drizzle/${e.tag}.sql`, path.join(almostDir, `${e.tag}.sql`));
 await migrate(db, { migrationsFolder: almostDir });
@@ -67,7 +67,9 @@ await pool.query(`UPDATE giveaways SET platform_settings = jsonb_set(platform_se
   [JSON.stringify({ posts: [{ id: '1000', permalink: 'https://www.instagram.com/p/P1/', postedAt: '2026-10-19T20:00:00.000Z' }] })]);
 await migrate(db, { migrationsFolder: `${repo}/drizzle` });
 const gta = (await pool.query(`SELECT * FROM giveaways WHERE slug='gta6-2026'`)).rows[0];
-ok('GTA becomes giveaway #1 with settings', gta.id === 1 && gta.name === 'GTA VI Giveaway' && gta.platform_settings.discord?.channel === 'gta-giveaway', gta);
+ok('GTA becomes giveaway #1 with settings', gta.id === 1 && gta.name === 'GTA VI Giveaway' && JSON.stringify(gta.platform_settings.discord) === '{"channels":["gta-giveaway"]}', gta);
+const gtaEnter = (await pool.query(`SELECT options FROM giveaway_rules WHERE giveaway_id=1 AND action='enter'`)).rows[0];
+ok('GTA channel moved onto its enter rule', gtaEnter?.options.channel === 'gta-giveaway', gtaEnter);
 ok('GTA form: Instagram account field, locked', gta.form_fields[0].type === 'account' && gta.form_fields[0].locked === true, gta.form_fields);
 const gtaRules = (await pool.query(`SELECT * FROM giveaway_rules WHERE giveaway_id=1 ORDER BY position`)).rows;
 const sig = (r: any) => `${r.platform}:${r.action}:${r.type}`;
@@ -75,8 +77,8 @@ ok('GTA rules: Discord enter + member required, IG comment + story bonus',
   gtaRules.some(r => sig(r) === 'discord:enter:required') && gtaRules.some(r => sig(r) === 'discord:member:required')
   && gtaRules.some(r => sig(r) === 'instagram:comment:bonus' && r.options.requireTag === true) && gtaRules.some(r => sig(r) === 'instagram:story:bonus'), gtaRules.map(sig));
 const acts = (await pool.query(`SELECT * FROM activities WHERE giveaway_id=1 ORDER BY id`)).rows;
-ok('entrant → Discord enter activity; legacy bonus → comment activity',
-  acts.some(a => a.platform === 'discord' && a.action === 'enter' && a.discord_id === 'd1') && acts.some(a => a.action === 'comment' && a.source_ref === 'c-legacy'), acts);
+ok('entrant → Discord enter activity (with its channel); legacy bonus → comment activity',
+  acts.some(a => a.platform === 'discord' && a.action === 'enter' && a.discord_id === 'd1' && a.details.channel === 'gta-giveaway' && a.source_ref === 'd1:gta-giveaway') && acts.some(a => a.action === 'comment' && a.source_ref === 'c-legacy'), acts);
 const gtaComment = (await pool.query(`SELECT options FROM giveaway_rules WHERE giveaway_id=1 AND action='comment'`)).rows[0];
 const gtaSettings = (await pool.query(`SELECT platform_settings FROM giveaways WHERE id=1`)).rows[0].platform_settings;
 ok('GTA post moved onto its comment rule', gtaComment?.options.post?.id === '1000' && JSON.stringify(gtaSettings.instagram) === '{}', { gtaComment, gtaSettings });
@@ -115,7 +117,7 @@ const testGiveaway = {
   endsAt: iso(now + 20 * 60 * 60e3),
   baseWeight: 1,
   platforms: [
-    { platform: 'discord', settings: { channel: '#Test-Giveaway' }, rules: discordReq },
+    { platform: 'discord', rules: [{ action: 'enter', type: 'required', options: { channel: '#Test-Giveaway' } }, { action: 'member', type: 'required' }] },
     { platform: 'instagram', rules: [
       { action: 'story', type: 'bonus', weight: 1, maxCount: 1 },
       { action: 'comment', type: 'bonus', weight: 1, maxCount: 1, options: { requireTag: true, post: 'https://www.instagram.com/p/P1/?igsh=xyz' } },
@@ -144,7 +146,7 @@ ok('end before start → 400', badDates.status === 400, badDates.json);
 
 const created = await api('POST', '/giveaways', testGiveaway);
 ok('create giveaway → 201, open, 2 platforms', created.status === 201 && created.json.status === 'open' && created.json.platforms.length === 2, created.json);
-ok('channel normalized', created.json.platforms[0].settings.channel === 'test-giveaway', created.json.platforms[0]);
+ok('channel normalized, on the enter rule', created.json.platforms[0].rules[0].options.channel === 'test-giveaway' && /in #test-giveaway/.test(created.json.platforms[0].rules[0].label), created.json.platforms[0]);
 ok('Instagram account field added + locked (Discord entry + Instagram)',
   created.json.formFields[0].type === 'account' && created.json.formFields[0].locked === true && created.json.formFields.length === 2, created.json.formFields);
 ok('rules have labels', igRules(created.json).every((r: any) => r.label?.startsWith('Instagram:')), igRules(created.json));
@@ -174,15 +176,15 @@ ok('PATCH with nulls → 200, nulls clear or keep', nullPatch.status === 200 && 
 const svc = await import(`${repo}/src/giveaway/service.ts`);
 const open = await svc.getOpenGiveaway();
 ok('open giveaway is the test one', open?.id === gid, open);
-const e1 = await svc.submitEntry({ giveaway: open, discordId: 'u1', discordUsername: 'alex', values: { ig: '@Alex.Plays', platform: 'PS5' } });
+const e1 = await svc.submitEntry({ channel: svc.enterChannels(open)[0] ?? 'none', giveaway: open, discordId: 'u1', discordUsername: 'alex', values: { ig: '@Alex.Plays', platform: 'PS5' } });
 ok('entry with form answers', e1.status === 'created' && e1.entrant.igUsername === 'alex.plays' && e1.entrant.answers.platform === 'PS5', e1);
-const e1b = await svc.submitEntry({ giveaway: open, discordId: 'u1', discordUsername: 'alex', values: { ig: 'alex.plays', platform: 'PC' } });
+const e1b = await svc.submitEntry({ channel: svc.enterChannels(open)[0] ?? 'none', giveaway: open, discordId: 'u1', discordUsername: 'alex', values: { ig: 'alex.plays', platform: 'PC' } });
 ok('edit answer → updated', e1b.status === 'updated' && e1b.entrant.answers.platform === 'PC', e1b);
-const badSelect = await svc.submitEntry({ giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'sam', platform: 'Switch' } });
+const badSelect = await svc.submitEntry({ channel: svc.enterChannels(open)[0] ?? 'none', giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'sam', platform: 'Switch' } });
 ok('invalid dropdown value rejected', badSelect.status === 'invalid', badSelect);
-const conflict = await svc.submitEntry({ giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'alex.plays', platform: 'PS5' } });
+const conflict = await svc.submitEntry({ channel: svc.enterChannels(open)[0] ?? 'none', giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'alex.plays', platform: 'PS5' } });
 ok('IG username already claimed → conflict', conflict.status === 'conflict', conflict);
-await svc.submitEntry({ giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'sam_ig', platform: 'Xbox' } });
+await svc.submitEntry({ channel: svc.enterChannels(open)[0] ?? 'none', giveaway: open, discordId: 'u2', discordUsername: 'sam', values: { ig: 'sam_ig', platform: 'Xbox' } });
 
 const record = (action: string, ig: string, ref: string, details: Record<string, unknown> = {}) =>
   svc.recordInstagramActivity({ giveaway: open, action, igUsername: ig, at: new Date(), sourceRef: ref, details });
@@ -294,8 +296,8 @@ ok('PATCH grouped winners (read-only fields sent back are ignored)', grouped.sta
 ok('create with nulls → defaults', capped.json.testMode === false && capped.json.winnerNotify === 'manual' && capped.json.claimHours === 12 && capped.json.formFields.length === 0 && capped.json.baseWeight === 1, capped.json);
 ok('delete an open giveaway → 409', (await api('DELETE', `/giveaways/${capped.json.id}?confirm=Capped`)).status === 409);
 const cg = await svc.getOpenGiveaway();
-await svc.submitEntry({ giveaway: cg, discordId: 'a', discordUsername: 'a', values: {} });
-await svc.submitEntry({ giveaway: cg, discordId: 'b', discordUsername: 'b', values: {} });
+await svc.submitEntry({ channel: svc.enterChannels(cg)[0] ?? 'none', giveaway: cg, discordId: 'a', discordUsername: 'a', values: {} });
+await svc.submitEntry({ channel: svc.enterChannels(cg)[0] ?? 'none', giveaway: cg, discordId: 'b', discordUsername: 'b', values: {} });
 ok('cap reached → closes automatically', (await svc.getOpenGiveaway()) === null && (await svc.getGiveaway(cg.id)).closeReason === 'cap');
 const reopened = await svc.extendGiveaway(await svc.getGiveaway(cg.id), { spots: 1 }, 'tester');
 ok('extend a full giveaway with spots → reopens', reopened.ok && reopened.giveaway.maxParticipants === 3 && (await svc.getOpenGiveaway())?.id === cg.id, reopened);
@@ -337,7 +339,7 @@ await igRec('comment', 'fan_one', 'igc1', { mediaId: '1001' });
 await igRec('tag', 'fan_one', 'igt1', { caption: 'hi' });
 await igRec('tag', 'fan_one', 'igt2', { caption: 'entering #BBTest!' });
 await igRec('tag', 'lurker', 'igt3', { caption: '#bbtest' });
-ok('Discord entries refused in instagram-only giveaways', (await svc.submitEntry({ giveaway: igG, discordId: 'dz', discordUsername: 'z', values: {} })).status === 'closed');
+ok('Discord entries refused in instagram-only giveaways', (await svc.submitEntry({ channel: svc.enterChannels(igG)[0] ?? 'none', giveaway: igG, discordId: 'dz', discordUsername: 'z', values: {} })).status === 'closed');
 const igPeople = (await api('GET', `/giveaways/${igOnly.json.id}/people`)).json;
 const fan = igPeople.find((p: any) => p.accounts.instagram === 'fan_one');
 ok('fan: base 1 + tag ×3 = 4 (tag without the caption text ignored)', fan?.eligible && fan.discord === null && fan.entries.total === 4, fan);
@@ -357,7 +359,7 @@ ok('either giveaway created, IG field auto-added', either.status === 201 && eith
 const eg = await svc.getOpenGiveaway();
 await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'both_ways', at: new Date(), sourceRef: 'c-both', details: { mediaId: '1001' } });
 await svc.recordInstagramActivity({ giveaway: eg, action: 'comment', igUsername: 'ig_only', at: new Date(), sourceRef: 'c-ig', details: { mediaId: '1001' } });
-const linked = await svc.submitEntry({ giveaway: eg, discordId: 'd-both', discordUsername: 'bothways', values: { ig: 'both_ways' } });
+const linked = await svc.submitEntry({ channel: svc.enterChannels(eg)[0] ?? 'none', giveaway: eg, discordId: 'd-both', discordUsername: 'bothways', values: { ig: 'both_ways' } });
 ok('Discord entry links to the Instagram person', linked.status !== 'conflict' && linked.entrant?.discordId === 'd-both', linked);
 const ePeople = (await api('GET', `/giveaways/${either.json.id}/people`)).json;
 const both = ePeople.find((p: any) => p.accounts.instagram === 'both_ways');
@@ -376,8 +378,8 @@ const follow = await api('POST', '/giveaways', {
 const followRule = follow.json.platforms[1].rules[0];
 ok('follow rule defaults to check: winners', follow.status === 201 && followRule.check === 'winners', follow.json);
 const fg = await svc.getOpenGiveaway();
-await svc.submitEntry({ giveaway: fg, discordId: 'f1', discordUsername: 'f1', values: { ig: 'f1_ig' } });
-await svc.submitEntry({ giveaway: fg, discordId: 'f2', discordUsername: 'f2', values: { ig: 'f2_ig' } });
+await svc.submitEntry({ channel: svc.enterChannels(fg)[0] ?? 'none', giveaway: fg, discordId: 'f1', discordUsername: 'f1', values: { ig: 'f1_ig' } });
+await svc.submitEntry({ channel: svc.enterChannels(fg)[0] ?? 'none', giveaway: fg, discordId: 'f2', discordUsername: 'f2', values: { ig: 'f2_ig' } });
 const fPeople = (await api('GET', `/giveaways/${follow.json.id}/people`)).json;
 ok('eligible before the check, with the check listed', fPeople.every((p: any) => p.eligible && p.winnerChecks.length === 1), fPeople);
 await api('POST', `/giveaways/${follow.json.id}/close`);
@@ -390,6 +392,28 @@ ok('check confirmed → pending (ready to notify)', conf.status === 200 && conf.
 const w2 = await api('POST', `/giveaways/${follow.json.id}/winners`, { personId: f2.id });
 const rej = await api('POST', `/giveaways/${follow.json.id}/winners/${w2.json.id}/checks/${followRule.id}`, { confirmed: false });
 ok('check rejected → declined', rej.status === 200 && rej.json.status === 'declined', rej.json);
+
+// ----- Several enter rules, each in its own channel: an enter rule counts entries made in its channel.
+const chan = (ch: string, type = 'required') => ({ action: 'enter', type, options: { channel: ch } });
+const twoBase = { name: 'Two Channels', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3) };
+ok('enter rule without a channel → 400', (await api('POST', '/giveaways', { ...twoBase, platforms: [{ platform: 'discord', rules: [{ action: 'enter', type: 'required' }] }] })).status === 400);
+ok('channel on a non-enter rule → 400', (await api('POST', '/giveaways', { ...twoBase, platforms: [{ platform: 'discord', rules: [chan('a'), { action: 'member', type: 'required', options: { channel: 'a' } }] }] })).status === 400);
+ok('two enter rules in the same channel → 400', (await api('POST', '/giveaways', { ...twoBase, platforms: [{ platform: 'discord', rules: [chan('a'), chan('#A', 'bonus')] }] })).status === 400);
+const two = await api('POST', '/giveaways', { ...twoBase, platforms: [{ platform: 'discord', rules: [chan('main-chan'), chan('second-chan', 'bonus')] }] });
+ok('two entry channels saved', two.status === 201 && two.json.platforms[0].rules.map((r: any) => r.options.channel).join() === 'main-chan,second-chan', two.json);
+const tg = await svc.getOpenGiveaway();
+ok('giveaway knows both entry channels', svc.enterChannels(tg).join() === 'main-chan,second-chan', tg.platformSettings);
+await svc.submitEntry({ giveaway: tg, channel: 'main-chan', discordId: 't1', discordUsername: 't1', values: {} });
+await svc.submitEntry({ giveaway: tg, channel: 'main-chan', discordId: 't2', discordUsername: 't2', values: {} });
+const again = await svc.submitEntry({ giveaway: tg, channel: 'second-chan', discordId: 't2', discordUsername: 't2', values: {} });
+ok('entering in the second channel too → updated', again.status === 'updated', again);
+await svc.submitEntry({ giveaway: tg, channel: 'second-chan', discordId: 't3', discordUsername: 't3', values: {} });
+const tPeople = (await api('GET', `/giveaways/${two.json.id}/people`)).json;
+const tp = (id: string) => tPeople.find((p: any) => p.discord.id === id);
+ok('main channel only → 1', tp('t1').eligible && tp('t1').entries.total === 1, tp('t1'));
+ok('both channels → 1 + 1 bonus = 2', tp('t2').entries.total === 2, tp('t2'));
+ok('second channel only → not eligible (main entry missing)', !tp('t3').eligible && tp('t3').missing.some((m: string) => /#main-chan/.test(m)), tp('t3'));
+await api('POST', `/giveaways/${two.json.id}/close`);
 
 // ----- Each comment rule has its own post: a bonus for the main post and another for the promo Reel.
 const reelG = await api('POST', '/giveaways', {
@@ -409,8 +433,8 @@ const reelRule = igRules(reelPatched.json)[1];
 ok('Reel rule: link saved as the post, label names it', reelPatched.status === 200 && reelRule?.options.post?.id === '1002' && /instagram\.com\/reel\/REEL1/.test(reelRule.label), reelPatched.json);
 ok('main post rule kept its post', igRules(reelPatched.json)[0].options.post?.id === '1001', igRules(reelPatched.json));
 const rg = await svc.getOpenGiveaway();
-await svc.submitEntry({ giveaway: rg, discordId: 'r1', discordUsername: 'r1', values: { ig: 'r1_ig' } });
-await svc.submitEntry({ giveaway: rg, discordId: 'r2', discordUsername: 'r2', values: { ig: 'r2_ig' } });
+await svc.submitEntry({ channel: svc.enterChannels(rg)[0] ?? 'none', giveaway: rg, discordId: 'r1', discordUsername: 'r1', values: { ig: 'r1_ig' } });
+await svc.submitEntry({ channel: svc.enterChannels(rg)[0] ?? 'none', giveaway: rg, discordId: 'r2', discordUsername: 'r2', values: { ig: 'r2_ig' } });
 const rc = (ig: string, ref: string, mediaId: string) => svc.recordInstagramActivity({ giveaway: rg, action: 'comment', igUsername: ig, at: new Date(), sourceRef: ref, details: { mediaId } });
 await rc('r1_ig', 'rc1', '1001');
 await rc('r1_ig', 'rc2', '1002');

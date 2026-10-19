@@ -83,7 +83,8 @@ export async function readsInstagram(g: Giveaway) {
   return (await getRules(g.id)).some(r => r.platform === 'instagram' && (r.action === 'tag' || (r.action === 'comment' && !!r.options.post)));
 }
 
-export const discordChannel = (g: Giveaway) => g.platformSettings.discord?.channel ?? null;
+/** Channels (names) where /giveaway enter works: one per enter rule. */
+export const enterChannels = (g: Giveaway) => g.platformSettings.discord?.channels ?? [];
 
 // ---------------------------------------------------------------------------
 // Giveaways
@@ -239,6 +240,8 @@ export async function submitEntry(input: {
   giveaway: Giveaway;
   discordId: string;
   discordUsername: string;
+  /** The channel (name) they entered in. */
+  channel: string;
   values: Record<string, string>;
 }): Promise<EntryResult> {
   const g = input.giveaway;
@@ -284,8 +287,14 @@ export async function submitEntry(input: {
     }
   }
 
-  const hasEntered = existing ? !!(await db.query.activities.findFirst({ where: and(eq(activities.giveawayId, g.id), eq(activities.platform, 'discord'), eq(activities.action, 'enter'), eq(activities.discordId, input.discordId)) })) : false;
-  if (existing && hasEntered && existing.igUsername === igUsername && JSON.stringify(existing.answers) === JSON.stringify(answers)) {
+  // One "enter" per channel: entering again in the same channel just updates the answers.
+  const sourceRef = `${input.discordId}:${input.channel}`;
+  const entered = existing
+    ? await db.query.activities.findMany({ where: and(eq(activities.giveawayId, g.id), eq(activities.platform, 'discord'), eq(activities.action, 'enter'), eq(activities.discordId, input.discordId)) })
+    : [];
+  const hasEntered = entered.length > 0;
+  const enteredHere = entered.some(a => a.sourceRef === sourceRef);
+  if (existing && enteredHere && existing.igUsername === igUsername && JSON.stringify(existing.answers) === JSON.stringify(answers)) {
     return { status: 'unchanged', entrant: existing };
   }
 
@@ -321,7 +330,7 @@ export async function submitEntry(input: {
 
   await db
     .insert(activities)
-    .values({ giveawayId: g.id, platform: 'discord', action: 'enter', discordId: input.discordId, sourceRef: input.discordId, at: new Date() })
+    .values({ giveawayId: g.id, platform: 'discord', action: 'enter', discordId: input.discordId, sourceRef, at: new Date(), details: { channel: input.channel } })
     .onConflictDoNothing();
 
   // The entry that fills the last spot closes the giveaway.

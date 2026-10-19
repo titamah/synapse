@@ -10,7 +10,7 @@ import {
 } from 'discord.js';
 import type { FormField } from '../db/schema.js';
 import { channelName } from '../discord/channels.js';
-import { discordChannel, getEntrantByDiscord, getGiveaway, getOpenGiveaway, isInstagramField, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
+import { enterChannels, getEntrantByDiscord, getGiveaway, getOpenGiveaway, isInstagramField, submitEntry, type Entrant, type EntryResult, type Giveaway } from './service.js';
 import { announceConflict } from './announcements.js';
 
 const ephemeral = MessageFlags.Ephemeral;
@@ -57,19 +57,21 @@ export async function showEntryModal(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  const channel = interaction.channel;
-  const entryChannel = discordChannel(g);
-  const wanted = entryChannel ? channelName(entryChannel) : null;
-  if (wanted && (!channel || !('name' in channel) || channel.name !== wanted)) {
-    const target = interaction.guild?.channels.cache.find(c => c.name === wanted);
-    await interaction.reply({ content: `Head over to ${target ? `<#${target.id}>` : `#${wanted}`} to enter!`, flags: ephemeral });
+  const here = interaction.channel && 'name' in interaction.channel ? interaction.channel.name : null;
+  const wanted = enterChannels(g).map(channelName);
+  if (!here || !wanted.includes(here)) {
+    const mention = (name: string) => {
+      const target = interaction.guild?.channels.cache.find(c => c.name === name);
+      return target ? `<#${target.id}>` : `#${name}`;
+    };
+    await interaction.reply({ content: `Head over to ${wanted.map(mention).join(' or ')} to enter!`, flags: ephemeral });
     return;
   }
 
   // No questions to ask (e.g. a Discord-only giveaway): enter right away, no form.
   if (!g.formFields.length) {
     await interaction.deferReply({ flags: ephemeral });
-    const result = await submitEntry({ giveaway: g, discordId: interaction.user.id, discordUsername: interaction.user.username, values: {} });
+    const result = await submitEntry({ giveaway: g, discordId: interaction.user.id, discordUsername: interaction.user.username, channel: here, values: {} });
     await interaction.editReply(entryReply(g, result));
     return;
   }
@@ -106,10 +108,18 @@ export async function handleGiveawayModal(interaction: ModalSubmitInteraction) {
     }
   }
 
+  // The form opens only in an entry channel, so it's submitted from one.
+  const here = interaction.channel && 'name' in interaction.channel ? interaction.channel.name : null;
+  const channel = here && enterChannels(g).includes(here) ? here : enterChannels(g)[0];
+  if (!channel) {
+    await interaction.editReply(NOT_OPEN);
+    return;
+  }
   const result = await submitEntry({
     giveaway: g,
     discordId: interaction.user.id,
     discordUsername: interaction.user.username,
+    channel,
     values,
   });
   if (result.status === 'conflict' && result.igUsername) {

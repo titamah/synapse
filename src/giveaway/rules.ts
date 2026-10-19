@@ -23,6 +23,8 @@ export type ActionContext = {
   caption?: string;
   /** For comments: the post it's on. */
   mediaId?: string;
+  /** For Discord entries: the channel it was in. */
+  channel?: string;
 };
 
 const TZ = 'America/New_York';
@@ -63,6 +65,7 @@ export function chooseRule(
     .filter(r => !r.options.requireTag || ctx.taggedFriend)
     .filter(r => !r.options.captionIncludes || (ctx.caption ?? '').toLowerCase().includes(r.options.captionIncludes.toLowerCase()))
     .filter(r => !r.options.post || r.options.post.id === ctx.mediaId)
+    .filter(r => !r.options.channel || r.options.channel === ctx.channel)
     .map(r => {
       // A rule's window never reaches outside the giveaway itself (e.g. after it closed early).
       const start = new Date(Math.max((r.windowStart ?? giveawayWindow.start).getTime(), giveawayWindow.start.getTime()));
