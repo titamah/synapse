@@ -17,6 +17,7 @@ import type { Command } from './types/discord.js';
 import { startWebServer } from './web/server.js';
 import { runScheduledSyncs } from './instagram/sync.js';
 import { runRetention } from './giveaway/retention.js';
+import { FLAG_BUTTON, POST_BUTTON, handleFlagButton, handlePostButton, runFlagJob, runPostSuggestions } from './flags/discord.js';
 import { renewTokenIfDue } from './instagram/token.js';
 import { processPendingInstagramEvents } from './instagram/webhook.js';
 
@@ -64,6 +65,16 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
     if (interaction.isMessageContextMenuCommand() && interaction.commandName === POST_TO_CHANNEL) {
       await handlePostToChannel(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && FLAG_BUTTON.test(interaction.customId)) {
+      await handleFlagButton(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && POST_BUTTON.test(interaction.customId)) {
+      await handlePostButton(interaction);
       return;
     }
 
@@ -123,11 +134,17 @@ const minuteJob = setInterval(() => {
   void runAnnouncements(client).catch(err => console.error('Updates job failed:', err));
   void syncCommands(client).catch(err => console.error('Command sync failed:', err));
   void runWinnerJobs(client);
+  void runFlagJob(client).catch(err => console.error('Flags job failed:', err));
 }, MINUTE_JOB_MS);
 if (env.IG_ACCESS_TOKEN) {
   void runInstagramJob();
   instagramJob = setInterval(runInstagramJob, INSTAGRAM_JOB_MS);
 }
+
+// Every 10 minutes while a giveaway is open and a comment rule has no post: look for our new
+// Instagram posts and offer them in #community-updates.
+const POST_SUGGESTION_MS = 10 * 60 * 1000;
+const postSuggestionJob = setInterval(() => void runPostSuggestions(client).catch(err => console.error('New-post check failed:', err)), POST_SUGGESTION_MS);
 
 // Hourly: stats snapshots, the 7-day heads-up and the 90-day deletion of personal data.
 const RETENTION_JOB_MS = 60 * 60 * 1000;
@@ -140,6 +157,7 @@ async function shutdown(signal: string) {
   clearInterval(instagramJob);
   clearInterval(minuteJob);
   clearInterval(retentionJob);
+  clearInterval(postSuggestionJob);
   webServer.close();
   await client.destroy();
   await pool.end();

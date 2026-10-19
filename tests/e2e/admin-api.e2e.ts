@@ -141,6 +141,12 @@ ok('resolve: garbage link → 404 with a clear message', badLink.status === 404 
 const noPost = await api('POST', '/giveaways', { ...testGiveaway, name: 'No Post Yet', testMode: true, startsAt: '2028-03-01T12:00:00-05:00', endsAt: '2028-03-02T12:00:00-05:00',
   platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: null, requireTag: true } }] }] });
 ok('comment rule without a post → saved, labeled "no post yet"', noPost.status === 201 && !igRules(noPost.json)[0].options.post && /no post yet/.test(igRules(noPost.json)[0].label), noPost.json);
+const npFlag = noPost.json.flags?.find((f: any) => f.code === 'comment_post_missing');
+ok('scheduled giveaway: missing post is an info flag', npFlag?.severity === 'info' && npFlag.open && npFlag.actions.join() === 'dismiss' && /\/giveaways\/\d+\/$/.test(npFlag.resolveUrl), noPost.json.flags);
+ok('info flag can\'t be snoozed', (await api('POST', `/flags/${npFlag.id}/snooze`)).status === 409);
+const dismissed = await api('POST', `/flags/${npFlag.id}/dismiss`);
+ok('info flag dismissed', dismissed.status === 200 && dismissed.json.open === false && !!dismissed.json.dismissedAt, dismissed.json);
+ok('dismissed flags hidden from GET /flags, shown with ?all=1', !(await api('GET', `/flags?giveawayId=${noPost.json.id}`)).json.length && (await api('GET', `/flags?giveawayId=${noPost.json.id}&all=1`)).json.length === 1);
 ok('…and deleted again', (await api('DELETE', `/giveaways/${noPost.json.id}`)).status === 200);
 const unknownPost = await api('POST', '/giveaways', { ...testGiveaway, platforms: [testGiveaway.platforms[0], { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus', options: { post: 'https://www.instagram.com/p/NOPE/' } }] }] });
 ok("post that isn't ours → 400", unknownPost.status === 400 && /Couldn't find that post/.test(unknownPost.json.error), unknownPost.json);
@@ -447,6 +453,20 @@ const rPeople = (await api('GET', `/giveaways/${reelG.json.id}/people`)).json;
 ok('main + Reel comments → 1 + 1 + 1 = 3', rPeople.find((p: any) => p.discord.id === 'r1').entries.total === 3, rPeople);
 ok('two main-post comments → 1 + 1 = 2 (no Reel bonus)', rPeople.find((p: any) => p.discord.id === 'r2').entries.total === 2, rPeople);
 await api('POST', `/giveaways/${reelG.json.id}/close`);
+
+// ----- Flags on a live giveaway: a comment rule with no post is blocking until a post is set.
+const fl = await api('POST', '/giveaways', { name: 'Flag Check', startsAt: iso(Date.now() - 60e3), endsAt: iso(Date.now() + 30 * 60e3),
+  platforms: [{ platform: 'discord', rules: [chan('flag-chan')] }, { platform: 'instagram', rules: [{ action: 'comment', type: 'bonus' }] }] });
+let flFlags = (await api('GET', `/flags?giveawayId=${fl.json.id}`)).json;
+ok('open giveaway: missing post is blocking', flFlags.length === 1 && flFlags[0].severity === 'blocking' && flFlags[0].actions.length === 0, flFlags);
+ok("blocking flag can't be snoozed or dismissed", (await api('POST', `/flags/${flFlags[0].id}/snooze`)).status === 409 && (await api('POST', `/flags/${flFlags[0].id}/dismiss`)).status === 409);
+const flRules = keepRules(fl.json);
+flRules[1].rules[0].options = { post: '1001' };
+ok('set the post', (await api('PATCH', `/giveaways/${fl.json.id}`, { platforms: flRules })).status === 200);
+flFlags = (await api('GET', `/flags?giveawayId=${fl.json.id}&all=1`)).json;
+ok('missing-post flag clears itself once the post is set', !flFlags.some((f: any) => f.code === 'comment_post_missing'), flFlags);
+ok('…and a failing Instagram read is flagged (the fake Instagram refuses comment reads)', flFlags.some((f: any) => f.code === 'ig_sync_failing' && f.severity === 'blocking'), flFlags);
+await api('POST', `/giveaways/${fl.json.id}/close`);
 
 // ----- Retention: 90 days after the end, personal data goes; setup, stats and winners stay.
 const ret = await import(`${repo}/src/giveaway/retention.ts`);

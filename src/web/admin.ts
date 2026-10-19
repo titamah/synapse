@@ -16,6 +16,7 @@ import { resolveAnnouncements } from '../giveaway/announcementRules.js';
 import type { EngineRule } from '../giveaway/engine.js';
 import { describeRule, ruleLabel } from '../giveaway/labels.js';
 import { deletesAt, saveStats } from '../giveaway/retention.js';
+import { actOnFlag, flagJson, syncFlags } from '../flags/flags.js';
 import { DEFAULT_WINNER_MESSAGE, openSlots } from '../giveaway/winnerRules.js';
 import { confirmWinnerCheck, drawWinner, eligiblePool, listWinners, notifyWinner, resolveWinner, selectWinner } from '../giveaway/winners.js';
 import {
@@ -357,6 +358,8 @@ async function giveawayJson(g: Giveaway, client?: Client) {
     // "removed per privacy policy" once personalDataDeletedAt is set.
     personalDataDeletesAt: statusOf(g) === 'closed' ? deletesAt(g) : null,
     personalDataDeletedAt: g.personalDataDeletedAt,
+    // Things that need attention (see GET /flags).
+    flags: (await syncFlags(client)).active.filter(f => f.giveawayId === g.id).map(f => flagJson(f)),
     createdAt: g.createdAt,
     updatedAt: g.updatedAt,
     // ----- v1 mirrors (deprecated): for dashboards not yet on v2.
@@ -711,6 +714,30 @@ export function createAdminRouter(client?: Client) {
     await runCommentSync(g, 'manual');
     res.json({ igSync: await getSyncStatus(g.id) });
   });
+
+  // ----- Flags
+
+  // Everything that needs attention. ?giveawayId=6 for one giveaway; ?all=1 includes snoozed/dismissed.
+  router.get('/flags', async (req, res) => {
+    const gid = typeof req.query.giveawayId === 'string' ? Number(req.query.giveawayId) : null;
+    const all = req.query.all === '1' || req.query.all === 'true';
+    const { active } = await syncFlags(client);
+    const order = { blocking: 0, warning: 1, info: 2 } as const;
+    res.json(
+      active
+        .map(f => flagJson(f))
+        .filter(f => (gid === null || f.giveawayId === gid) && (all || f.open))
+        .sort((a, b) => order[a.severity] - order[b.severity] || +new Date(a.since) - +new Date(b.since)),
+    );
+  });
+
+  for (const action of ['snooze', 'dismiss'] as const) {
+    router.post(`/flags/:flagId/${action}`, requireActor, async (req: Req, res) => {
+      const result = await actOnFlag(Number(req.params.flagId), action, req.actor!, client);
+      if ('error' in result) return void res.status(409).json({ error: result.error });
+      res.json(flagJson(result.flag));
+    });
+  }
 
   // ----- Instagram
 

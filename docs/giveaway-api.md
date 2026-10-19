@@ -72,6 +72,10 @@ await fetch('https://api.bostonblerds.com/admin/giveaways', {
 | POST | `/giveaways/:id/sync` | — | `{ igSync }` |
 | GET | `/instagram/status` | — | Connection health |
 | POST | `/instagram/renew` | — | Connection health, after renewing |
+| **Flags** | | | |
+| GET | `/flags?giveawayId=6&all=1` | — | `Flag[]`, most severe first. Both query params optional. |
+| POST | `/flags/:flagId/snooze` | — | `Flag` (warnings only) |
+| POST | `/flags/:flagId/dismiss` | — | `Flag` (info only) |
 | **Exports** | | | |
 | GET | `/giveaways/:id/export/entries.csv` | — | CSV |
 | GET | `/giveaways/:id/export/entrants.csv` | — | CSV |
@@ -166,6 +170,31 @@ A declined or expired winner stays in the history, **all their entries are disqu
 - **Sync now:** `POST /giveaways/:id/sync` reads immediately and returns the result ([InstagramSync](#instagramsync)). Show a warning if `lastError` is set.
 - **Connection:** `GET /instagram/status` returns `{ configured, expiresAt, refreshedAt, lastAttemptAt, lastError }`. The token renews itself weekly. Warn if `lastError` is set or `expiresAt` is under 2 weeks away. `POST /instagram/renew` renews now.
 
+## Flags
+
+Flags are things that need an admin's attention. Synapse works them out from the current state every time, so **a flag clears itself as soon as what it checks is fixed**. Show them on the dashboard from `GET /flags`, or from each giveaway's `flags`.
+
+| Level | Meaning | Besides fixing it |
+|---|---|---|
+| `blocking` | Something isn't working on a live giveaway. | Nothing: it stays until fixed. |
+| `warning` | Needs attention soon. | **Snooze** for 24 hours. It comes back if still true. |
+| `info` | A heads-up. | **Dismiss**. |
+
+| `code` | Level | Raised when… | Clears when… |
+|---|---|---|---|
+| `comment_post_missing` | `info` while scheduled, `blocking` once open | A comment rule has no post. | A post is set, in the dashboard or with the Discord button. |
+| `entry_channel_problem` | `warning` while scheduled, `blocking` once open | An `enter` channel doesn't exist, or BB-Bot can't see or post in it. | The channel is fixed, or the rule's channel is changed. |
+| `ig_sync_failing` | `blocking` | Reading Instagram fails on an open giveaway. | The next read succeeds. |
+| `ig_token` | `warning` | Renewing the Instagram token failed, or it expires within 2 weeks. | It renews. |
+| `winner_waiting` | `warning` | A winner is waiting on winner checks, or is unreachable. | An admin confirms the checks or reports the outcome. |
+| `username_conflict` | `warning` | Someone couldn't enter because their Instagram username was already used. | Whoever doesn't own it is disqualified. |
+| `retention_upcoming` | `info` | Personal data will be deleted within 7 days. | It's deleted, or dismissed. |
+
+**In Discord (#community-updates):**
+- **Alerts:** each flag is posted once when it appears, with a **Resolve** button to the dashboard (`ADMIN_DASHBOARD_URL/giveaways/<id>/`), plus **Snooze 24h** (warnings) or **Dismiss** (info). When it clears, the alert changes to ✅ Resolved. A missing post on a scheduled giveaway doesn't alert, only once the giveaway opens. Test-mode giveaways never alert. Username conflicts are already alerted when they happen.
+- **Daily digest** at midnight Eastern: every open flag in one message. Nothing is posted if there are none.
+- **New-post suggestion:** while a giveaway is open and a comment rule has no post, Synapse checks @BostonBlerds' posts every 10 minutes. For each new post (from a day before the start on), BB-Bot asks "Use for Rule #4?" with one button per rule missing a post, plus "Not this one". Choosing a rule sets the post and reads its comments back to the start.
+
 ## Exports
 
 CSV files, calculated on the server the same way as the dashboard and draws. File names start with the giveaway's name.
@@ -190,7 +219,7 @@ CSV files, calculated on the server the same way as the dashboard and draws. Fil
 
 # Objects
 
-**Contents:** [Giveaway](#giveaway) · [Platform](#platform) · [Rule](#rule) · [Actions](#actions) · [FormField](#formfield) · [Announcements](#announcements) · [WinnerSettings](#winnersettings) · [Winner](#winner) · [Person](#person) · [Override](#override) · [Preview](#preview) · [Stats](#stats) · [InstagramSync](#instagramsync)
+**Contents:** [Giveaway](#giveaway) · [Platform](#platform) · [Rule](#rule) · [Actions](#actions) · [FormField](#formfield) · [Announcements](#announcements) · [WinnerSettings](#winnersettings) · [Winner](#winner) · [Person](#person) · [Override](#override) · [Preview](#preview) · [Stats](#stats) · [InstagramSync](#instagramsync) · [Flag](#flag)
 
 ## Giveaway
 
@@ -247,6 +276,7 @@ CSV files, calculated on the server the same way as the dashboard and draws. Fil
 | `stats` | `Stats` \| null | — | The numbers once closed. Kept after personal data is deleted. |
 | `personalDataDeletesAt` | timestamp \| null | — | When people and activity will be deleted (90 days after the end). Set once closed. |
 | `personalDataDeletedAt` | timestamp \| null | — | Set once they were. |
+| `flags` | `Flag[]` | — | This giveaway's current [flags](#flag), including snoozed and dismissed ones (check `open`). |
 | `createdAt`, `updatedAt` | timestamp | — | Bookkeeping. |
 
 **Checked on save** (`400` with a message if not):
@@ -496,6 +526,29 @@ Returned in a Person as `{ id, kind, ruleId, label, weight, reason, by, at }`.
 ```
 
 `lastReason`: `scheduled` (every 30 minutes), `post-set` (a new post was saved), `manual` (Sync now), `final` (after close).
+
+## Flag
+
+```jsonc
+{ "id": 12, "key": "comment_post_missing:6:27", "code": "comment_post_missing", "severity": "blocking",
+  "giveawayId": 6, "ruleId": 27, "winnerId": null,
+  "message": "GTA VI Giveaway: Rule #4 (Instagram: commented on a giveaway post (tagging a friend) (no post yet)) has no post, so its comments don't count yet.",
+  "since": "…", "open": true, "snoozedUntil": null, "dismissedAt": null,
+  "actions": [], "resolveUrl": "https://admin.bostonblerds.com/giveaways/6/" }
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Use with `/flags/:flagId/snooze` or `/dismiss`. |
+| `key` | Stable name for this exact flag. |
+| `code`, `severity` | What it is and how urgent. See [Flags](#flags). |
+| `giveawayId` | `null` for flags not about one giveaway (e.g. the Instagram token). |
+| `ruleId`, `winnerId` | What it's about, when relevant. |
+| `message` | Ready to show. May contain Discord mentions like `<@123>`. |
+| `since` | When it appeared. |
+| `open` | `false` while snoozed or once dismissed. |
+| `actions` | What can be done besides fixing it: `["snooze"]`, `["dismiss"]` or `[]`. |
+| `resolveUrl` | Where to fix it on the dashboard. |
 
 ---
 

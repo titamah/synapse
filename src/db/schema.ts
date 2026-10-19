@@ -308,3 +308,28 @@ export const webhookEvents = pgTable(
   },
   t => [index('webhook_events_unprocessed_idx').on(t.source, t.processedAt)],
 );
+
+/**
+ * What Synapse remembers about each flag (flags themselves are calculated from the current state,
+ * see src/flags). One row per flag key, kept after it clears so a returning flag alerts again.
+ */
+export const flagStates = pgTable(
+  'flag_states',
+  {
+    id: serial('id').primaryKey(),
+    // e.g. "comment_post_missing:6:27": code, giveaway and subject.
+    key: text('key').notNull().unique(),
+    giveawayId: integer('giveaway_id').references(() => giveaways.id, { onDelete: 'cascade' }),
+    code: text('code').notNull(),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    // The alert in #community-updates, edited to "Resolved" when the flag clears.
+    alertedAt: timestamp('alerted_at', { withTimezone: true }),
+    alertChannelId: text('alert_channel_id'),
+    alertMessageId: text('alert_message_id'),
+    snoozedUntil: timestamp('snoozed_until', { withTimezone: true }),
+    dismissedAt: timestamp('dismissed_at', { withTimezone: true }),
+    actedBy: text('acted_by'),
+  },
+  t => [index('flag_states_giveaway_idx').on(t.giveawayId)],
+);

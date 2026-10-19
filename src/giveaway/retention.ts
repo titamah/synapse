@@ -2,15 +2,12 @@ import type { Client } from 'discord.js';
 import { and, eq, inArray, isNotNull, isNull, like, lt } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { activities, auditLog, entrants, giveaways, overrides, settings, webhookEvents, winners, type GiveawayStats } from '../db/schema.js';
-import { postOnce } from './announcements.js';
 import { describeRule } from './labels.js';
 import { audit, computePeople, getRules, statusOf, type Giveaway } from './service.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 /** Personal data is deleted this long after a giveaway ends. */
 export const RETENTION_DAYS = 90;
-/** Heads-up in #community-updates this long before deletion. */
-const WARNING_DAYS = 7;
 /** Who won is kept this long after the end, then anonymized. */
 const WINNER_DAYS = 365;
 /** Stats are refreshed this often until personal data is deleted (late disqualifications, winner checks…). */
@@ -95,14 +92,7 @@ export async function runRetention(client: Client | undefined, now = new Date())
         continue;
       }
       if (!g.stats || now.getTime() - new Date(g.stats.takenAt).getTime() > STATS_REFRESH_MS) await saveStats(g);
-      if (client?.isReady() && now.getTime() >= due.getTime() - WARNING_DAYS * DAY) {
-        const when = due.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric' });
-        await postOnce(client, g, 'retention:warning', {
-          content:
-            `🗂️ **${g.name}:** people, activity and entries will be deleted on **${when}** (${RETENTION_DAYS} days after it ended), per our privacy policy. ` +
-            `Export anything you need from the dashboard before then. The setup, stats and winner stay.`,
-        });
-      }
+      // The 7-day heads-up is a flag (retention_upcoming, src/flags).
     } catch (err) {
       console.error(`Retention for "${g.name}" failed:`, (err as Error).message);
     }

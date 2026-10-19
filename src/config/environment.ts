@@ -24,6 +24,13 @@ const envSchema = z.object({
   // Shared secret for the admin dashboard (admin.bostonblerds.com) to call /admin/*. Any long random string.
   ADMIN_API_KEY: z.string().min(32).optional().or(z.literal('').transform(() => undefined)),
 
+  // The admin dashboard's address, for "Resolve" links in Discord (…/giveaways/<id>/). No trailing slash.
+  ADMIN_DASHBOARD_URL: z
+    .string()
+    .optional()
+    .transform(v => (v?.trim() || 'http://localhost:3000').replace(/\/+$/, ''))
+    .pipe(z.url()),
+
   DATABASE_URL: z.string().min(1, 'Database URL is required'),
 
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
