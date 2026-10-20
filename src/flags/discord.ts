@@ -19,7 +19,7 @@ import { audit, getGiveaway, getOpenGiveaway, getRules, type Giveaway } from '..
 import { listRecentPosts, resolvePost } from '../instagram/api.js';
 import { runCommentSync } from '../instagram/sync.js';
 import { isAdmin } from '../lib/permissions.js';
-import { actOnFlag, isOpen, resolveUrl, syncFlags, type ActiveFlag, type FlagState, type Severity } from './flags.js';
+import { actOnFlag, dashboardHome, isOpen, resolveUrl, syncFlags, type ActiveFlag, type FlagState, type Severity } from './flags.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 const COLOR: Record<Severity, number> = { blocking: 0xe5484d, warning: 0xf5a524, info: 0x3e8ed0 };
@@ -100,7 +100,7 @@ async function maybePostDigest(client: Client, active: ActiveFlag[], now: Date) 
   const channel = await adminChannel(client);
   await channel?.send({
     embeds: [new EmbedBuilder().setColor(COLOR[open.some(f => f.severity === 'blocking') ? 'blocking' : open.some(f => f.severity === 'warning') ? 'warning' : 'info']).setTitle(`📋 Daily flags: ${open.length} open`).setDescription(description)],
-    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(linkButton('Open dashboard', `${env.ADMIN_DASHBOARD_URL}/`))],
+    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(linkButton('Open dashboard', dashboardHome()))],
     allowedMentions: { parse: [] },
   });
 }

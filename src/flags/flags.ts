@@ -266,7 +266,9 @@ export async function syncFlags(client?: Client, now = new Date()) {
 /** Shown to admins (not snoozed or dismissed). */
 export const isOpen = (f: ActiveFlag, now = new Date()) => !f.state.dismissedAt && !(f.state.snoozedUntil && f.state.snoozedUntil > now);
 
-export const resolveUrl = (f: Pick<Flag, 'giveawayId'>) => (f.giveawayId ? `${env.ADMIN_DASHBOARD_URL}/giveaways/${f.giveawayId}/` : `${env.ADMIN_DASHBOARD_URL}/`);
+/** The dashboard's home page (for flags not about one giveaway). */
+export const dashboardHome = () => `${new URL(env.ADMIN_DASHBOARD_URL.replace('{id}', '1')).origin}/`;
+export const resolveUrl = (f: Pick<Flag, 'giveawayId'>) => (f.giveawayId ? env.ADMIN_DASHBOARD_URL.replace('{id}', String(f.giveawayId)) : dashboardHome());
 
 /** What an admin can do besides fixing it. */
 export const flagActions = (severity: Severity) => (severity === 'warning' ? ['snooze'] : severity === 'info' ? ['dismiss'] : []) as ('snooze' | 'dismiss')[];
