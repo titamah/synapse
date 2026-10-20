@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-time setup for off-site backups to Cloudflare R2. Run it yourself on the server:
 #   ~/synapse/scripts/setup-offsite-backup.sh
+# Needs rclone 1.6x+ (the server has the official release; Ubuntu's 1.60 package is too old for R2).
 # It asks for the R2 API token's keys (typed, not shown), makes an encryption passphrase,
 # and saves both where only this user can read them. Safe to re-run to replace the keys.
 set -euo pipefail
@@ -47,7 +48,8 @@ fi
 chmod 600 "$CONF_DIR/passphrase" "$CONF_DIR/env"
 
 echo "Checking R2…"
-probe="setup-check-$(date +%s).txt"
-echo "ok" | rclone rcat "r2:$BUCKET/$probe" && rclone deletefile "r2:$BUCKET/$probe" \
+# A normal file upload, like the nightly backup (R2 doesn't support rclone's streamed "rcat").
+probe="$(mktemp)"; echo ok > "$probe"
+rclone copyto "$probe" "r2:$BUCKET/setup-check.txt" && rclone deletefile "r2:$BUCKET/setup-check.txt" && rm -f "$probe" \
   && echo "✅ R2 works. Nightly backups will now be encrypted and copied to r2:$BUCKET." \
   || { echo "❌ Couldn't write to r2:$BUCKET. Check the endpoint, keys and the token's bucket access, then re-run."; exit 1; }
