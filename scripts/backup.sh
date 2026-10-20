@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Nightly Postgres backup. Run from cron on the server:
 #   0 3 * * * /home/ubuntu/synapse/scripts/backup.sh >> /home/ubuntu/backups/backup.log 2>&1
-# Keeps the last KEEP_DAYS days of compressed dumps in ~/backups.
+# Keeps the last KEEP_DAYS days of compressed dumps in ~/backups, and an encrypted copy in
+# Cloudflare R2 once scripts/setup-offsite-backup.sh has been run.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,3 +24,22 @@ fi
 
 find "$BACKUP_DIR" -name 'synapse-*.sql.gz' -mtime +"$KEEP_DAYS" -delete
 echo "$(date) backup ok: $file ($(du -h "$file" | cut -f1))"
+
+# Off-site copy: encrypted, to Cloudflare R2 (set up with scripts/setup-offsite-backup.sh).
+# R2 deletes copies after 30 days (bucket lifecycle rule).
+CONF_DIR="$HOME/.config/synapse-backup"
+if [ -s "$CONF_DIR/passphrase" ] && [ -s "$CONF_DIR/env" ]; then
+  # shellcheck disable=SC1091
+  . "$CONF_DIR/env"
+  encrypted="$(mktemp)"
+  trap 'rm -f "$encrypted"' EXIT
+  gpg --batch --yes --quiet --symmetric --cipher-algo AES256 --passphrase-file "$CONF_DIR/passphrase" -o "$encrypted" "$file"
+  if rclone copyto "$encrypted" "r2:$BUCKET/$(basename "$file").gpg"; then
+    echo "$(date) offsite ok: r2:$BUCKET/$(basename "$file").gpg"
+  else
+    echo "$(date) offsite FAILED: couldn't upload to r2:$BUCKET" >&2
+    exit 1
+  fi
+else
+  echo "$(date) offsite skipped: not set up (scripts/setup-offsite-backup.sh)"
+fi
