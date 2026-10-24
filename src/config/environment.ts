@@ -25,7 +25,7 @@ const envSchema = z.object({
   ADMIN_API_KEY: z.string().min(32).optional().or(z.literal('').transform(() => undefined)),
 
   // The admin dashboard's giveaway page, for "Resolve" links in Discord. {id} is replaced by the
-  // giveaway's ID, e.g. https://admin.bostonblerds.com/giveaway/{id}/. Without {id}, /giveaways/{id}/ is added.
+  // giveaway's ID, e.g. https://admin.bostonblerds.com/giveaways/{id}. Without {id}, /giveaways/{id}/ is added.
   ADMIN_DASHBOARD_URL: z
     .string()
     .optional()
@@ -33,7 +33,7 @@ const envSchema = z.object({
       const url = v?.trim() || 'http://localhost:3000';
       return url.includes('{id}') ? url : `${url.replace(/\/+$/, '')}/giveaways/{id}/`;
     })
-    .refine(v => URL.canParse(v.replace('{id}', '1')), 'must be a URL, e.g. https://admin.bostonblerds.com/giveaway/{id}/'),
+    .refine(v => URL.canParse(v.replace('{id}', '1')), 'must be a URL, e.g. https://admin.bostonblerds.com/giveaways/{id}'),
 
   DATABASE_URL: z.string().min(1, 'Database URL is required'),
 

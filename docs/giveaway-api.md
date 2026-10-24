@@ -191,7 +191,7 @@ Flags are things that need an admin's attention. Synapse works them out from the
 | `retention_upcoming` | `info` | Personal data will be deleted within 7 days. | It's deleted, or dismissed. |
 
 **In Discord (#community-updates):**
-- **Alerts:** each flag is posted once when it appears, with a **Resolve** button to the dashboard (`ADMIN_DASHBOARD_URL`, e.g. `https://admin.bostonblerds.com/giveaway/6/`), plus **Snooze 24h** (warnings) or **Dismiss** (info). When it clears, the alert changes to ✅ Resolved. A missing post on a scheduled giveaway doesn't alert, only once the giveaway opens. Test-mode giveaways never alert. Username conflicts are already alerted when they happen.
+- **Alerts:** each flag is posted once when it appears, with a **Resolve** button to the dashboard (`ADMIN_DASHBOARD_URL`, e.g. `https://admin.bostonblerds.com/giveaways/6`), plus **Snooze 24h** (warnings) or **Dismiss** (info). When it clears, the alert changes to ✅ Resolved. A missing post on a scheduled giveaway doesn't alert, only once the giveaway opens. Test-mode giveaways never alert. Username conflicts are already alerted when they happen.
 - **Daily digest** at midnight Eastern: every open flag in one message. Nothing is posted if there are none.
 - **New-post suggestion:** while a giveaway is open and a comment rule has no post, Synapse checks @BostonBlerds' posts every 10 minutes. For each new post (from a day before the start on), BB-Bot asks "Use for Rule #4?" with one button per rule missing a post, plus "Not this one". Choosing a rule sets the post and reads its comments back to the start.
 
@@ -534,7 +534,7 @@ Returned in a Person as `{ id, kind, ruleId, label, weight, reason, by, at }`.
   "giveawayId": 6, "ruleId": 27, "winnerId": null,
   "message": "GTA VI Giveaway: Rule #4 (Instagram: commented on a giveaway post (tagging a friend) (no post yet)) has no post, so its comments don't count yet.",
   "since": "…", "open": true, "snoozedUntil": null, "dismissedAt": null,
-  "actions": [], "resolveUrl": "https://admin.bostonblerds.com/giveaway/6/" }
+  "actions": [], "resolveUrl": "https://admin.bostonblerds.com/giveaways/6" }
 ```
 
 | Field | Meaning |
