@@ -78,9 +78,12 @@ export async function giveawayPosts(g: Giveaway): Promise<{ id: string; permalin
   return [...seen.values()];
 }
 
-/** Does this giveaway read anything from Instagram (comments on its posts, or tagged posts)? */
+/**
+ * Does this giveaway use Instagram (comments on its posts, tagged posts, or Story mentions)?
+ * Those giveaways get the 30-minute read, which also checks the webhooks.
+ */
 export async function readsInstagram(g: Giveaway) {
-  return (await getRules(g.id)).some(r => r.platform === 'instagram' && (r.action === 'tag' || (r.action === 'comment' && !!r.options.post)));
+  return (await getRules(g.id)).some(r => r.platform === 'instagram' && (r.action === 'tag' || r.action === 'story' || (r.action === 'comment' && !!r.options.post)));
 }
 
 /** Channels (names) where /giveaway enter works: one per enter rule. */

@@ -27,6 +27,8 @@ export type FlagCode =
   | 'comment_post_missing'
   | 'entry_channel_problem'
   | 'ig_sync_failing'
+  | 'ig_story_webhook_off'
+  | 'ig_comment_webhook_missed'
   | 'ig_token'
   | 'winner_waiting'
   | 'username_conflict'
@@ -60,6 +62,10 @@ export type GiveawayFacts = {
   /** Entry channels with a problem: missing, or the bot can't see/post there. null = Discord unknown (offline). */
   channelProblems: { channel: string; problem: 'missing' | 'no-access' }[] | null;
   syncError: string | null;
+  /** From the latest Instagram read: Story webhooks off (false), on (true) or unknown (null). */
+  storyWebhookOn: boolean | null;
+  /** Comments the latest scheduled read found that the webhook never delivered. */
+  commentsMissedByWebhook: number;
   winnersWaiting: { id: number; status: string; who: string }[];
   /** Username conflicts still standing: the username's owner hasn't been disqualified. */
   conflicts: { igUsername: string; attemptedBy: string; claimedBy: string | null }[];
@@ -109,6 +115,28 @@ export function giveawayFlags(f: GiveawayFacts): Flag[] {
       severity: 'blocking',
       giveawayId: g.id,
       message: `${name(g)}: reading Instagram is failing, so new comments and tagged posts aren't counted. Last error: ${f.syncError}`,
+      alert: !quiet,
+    });
+  }
+
+  if (live && f.storyWebhookOn === false && f.rules.some(r => r.platform === 'instagram' && r.action === 'story')) {
+    out.push({
+      key: `ig_story_webhook_off:${g.id}`,
+      code: 'ig_story_webhook_off',
+      severity: 'blocking',
+      giveawayId: g.id,
+      message: `${name(g)}: Story mentions aren't arriving. Instagram webhooks ("messages") are off for @BostonBlerds; turn them back on in the Meta app dashboard.`,
+      alert: !quiet,
+    });
+  }
+
+  if (live && f.commentsMissedByWebhook > 0) {
+    out.push({
+      key: `ig_comment_webhook_missed:${g.id}`,
+      code: 'ig_comment_webhook_missed',
+      severity: 'warning',
+      giveawayId: g.id,
+      message: `${name(g)}: comment webhooks seem to be down (the last Instagram read found ${f.commentsMissedByWebhook} comment${f.commentsMissedByWebhook === 1 ? '' : 's'} they never delivered). Comments still count: the 30-minute reads cover it. Check the Meta app's webhook settings.`,
       alert: !quiet,
     });
   }
@@ -213,6 +241,8 @@ export async function computeFlags(client?: Client, now = new Date()): Promise<F
         rules,
         channelProblems: status === 'closed' ? [] : await channelProblems(client, g),
         syncError: sync?.lastError ?? null,
+        storyWebhookOn: sync?.webhooks?.messages ?? null,
+        commentsMissedByWebhook: sync?.commentsMissedByWebhook ?? 0,
         winnersWaiting: winners
           .filter(w => w.status === 'checking' || w.status === 'unreachable')
           .map(w => ({ id: w.id, status: w.status, who: w.person?.discordId ? `<@${w.person.discordId}>` : `@${w.person?.igUsername ?? 'unknown'}` })),

@@ -13,7 +13,7 @@ const giveaway = (over: Record<string, unknown> = {}) =>
   ({ id: 6, name: 'GTA VI Giveaway', slug: 'gta', testMode: false, startsAt: new Date('2026-10-19T17:00:00-04:00'), endsAt: new Date('2026-11-20T22:30:00-05:00'), closedAt: null, personalDataDeletedAt: null, ...over }) as any;
 const commentNoPost = { id: 27, position: 4, platform: 'instagram', action: 'comment', type: 'bonus', options: { requireTag: true } } as any;
 const facts = (over: Record<string, unknown> = {}) =>
-  ({ giveaway: giveaway(), status: 'open', rules: [commentNoPost], channelProblems: [], syncError: null, winnersWaiting: [], conflicts: [], now, ...over }) as any;
+  ({ giveaway: giveaway(), status: 'open', rules: [commentNoPost], channelProblems: [], syncError: null, storyWebhookOn: true, commentsMissedByWebhook: 0, winnersWaiting: [], conflicts: [], now, ...over }) as any;
 
 test('comment rule without a post: info (no alert) while scheduled, blocking + alert once open', () => {
   const scheduled = giveawayFlags(facts({ status: 'scheduled' }));
@@ -51,6 +51,17 @@ test('channel problems, sync errors, waiting winners and conflicts', () => {
   );
   assert.deepEqual(flags.map(f => `${f.code}:${f.severity}`), ['entry_channel_problem:blocking', 'ig_sync_failing:blocking', 'winner_waiting:warning', 'username_conflict:warning']);
   assert.equal(flags.find(f => f.code === 'username_conflict')!.alert, false);
+});
+
+test('webhooks: Story webhook off is blocking (only with a Story rule); missed comments are a warning', () => {
+  const story = { id: 30, position: 5, platform: 'instagram', action: 'story', type: 'bonus', options: {} } as any;
+  assert.deepEqual(giveawayFlags(facts({ rules: [story], storyWebhookOn: false })).map(f => `${f.code}:${f.severity}`), ['ig_story_webhook_off:blocking']);
+  assert.equal(giveawayFlags(facts({ rules: [story], storyWebhookOn: null })).length, 0, 'unknown is not off');
+  assert.equal(giveawayFlags(facts({ rules: [], storyWebhookOn: false })).length, 0, 'no Story rule, no flag');
+  const missed = giveawayFlags(facts({ rules: [], commentsMissedByWebhook: 2 }));
+  assert.deepEqual(missed.map(f => `${f.code}:${f.severity}`), ['ig_comment_webhook_missed:warning']);
+  assert.match(missed[0]!.message, /2 comments/);
+  assert.equal(giveawayFlags(facts({ rules: [], commentsMissedByWebhook: 2, status: 'scheduled' })).length, 0, 'only while open');
 });
 
 test('Instagram token: renewal failing or expiring within 2 weeks', () => {

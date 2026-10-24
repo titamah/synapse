@@ -44,6 +44,12 @@ async function getAll<T>(path: string, params: Record<string, string>, max = Inf
   return items.slice(0, max);
 }
 
+/** Which webhook fields @BostonBlerds is subscribed to for our app (e.g. ["messages"] for Story mentions). */
+export async function getWebhookFields(): Promise<string[]> {
+  const r = await graphGet<{ data: { subscribed_fields?: string[] }[] }>('/me/subscribed_apps');
+  return r.data.flatMap(d => d.subscribed_fields ?? []);
+}
+
 export async function getAccount() {
   return graphGet<{ user_id: string; username: string }>('/me', { fields: 'user_id,username' });
 }

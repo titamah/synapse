@@ -185,6 +185,8 @@ Flags are things that need an admin's attention. Synapse works them out from the
 | `comment_post_missing` | `info` while scheduled, `blocking` once open | A comment rule has no post. | A post is set, in the dashboard or with the Discord button. |
 | `entry_channel_problem` | `warning` while scheduled, `blocking` once open | An `enter` channel doesn't exist, or BB-Bot can't see or post in it. | The channel is fixed, or the rule's channel is changed. |
 | `ig_sync_failing` | `blocking` | Reading Instagram fails on an open giveaway. | The next read succeeds. |
+| `ig_story_webhook_off` | `blocking` | An open giveaway has a Story rule, but @BostonBlerds' "messages" webhook is off, so Story mentions can't arrive (checked on each 30-minute read). | The webhook is back on (next read). |
+| `ig_comment_webhook_missed` | `warning` | The last scheduled read found comments the webhook never delivered. Comments still count; the reads cover it. | A scheduled read finds none missed. |
 | `ig_token` | `warning` | Renewing the Instagram token failed, or it expires within 2 weeks. | It renews. |
 | `winner_waiting` | `warning` | A winner is waiting on winner checks, or is unreachable. | An admin confirms the checks or reports the outcome. |
 | `username_conflict` | `warning` | Someone couldn't enter because their Instagram username was already used. | Whoever doesn't own it is disqualified. |

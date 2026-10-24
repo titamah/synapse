@@ -3,6 +3,7 @@ import { db } from '../db/client.js';
 import { giveaways } from '../db/schema.js';
 import { getSetting, setSetting } from '../db/settings.js';
 import { getOpenGiveaway, readsInstagram, statusOf, type Giveaway } from '../giveaway/service.js';
+import { getWebhookFields } from './api.js';
 import { syncComments } from './comments.js';
 import { syncTaggedPosts } from './tags.js';
 
@@ -12,6 +13,10 @@ export type SyncStatus = {
   lastError: string | null;
   lastReason: string;
   lastResult: { comments: Record<string, number> | null; taggedPosts: Record<string, number> | null } | null;
+  /** Webhook health, checked on each read. messages = Story mentions arrive (null = couldn't check). */
+  webhooks?: { messages: boolean | null; checkedAt: string };
+  /** Comments the latest scheduled read found that the webhook never delivered (0 = fine). */
+  commentsMissedByWebhook?: number;
 };
 
 const statusKey = (id: number) => `ig_sync:${id}`;
@@ -29,13 +34,20 @@ export async function runCommentSync(g: Giveaway, reason: 'scheduled' | 'post-se
   const previous = await getSyncStatus(g.id);
   const now = new Date().toISOString();
   try {
-    const result = { comments: await syncComments(g), taggedPosts: await syncTaggedPosts(g) };
+    // Only scheduled reads judge the comment webhook: they cover the time since the last read
+    // (a "post set" read finds older comments the webhook was never meant to send).
+    const missedSince = reason === 'scheduled' && previous?.lastSuccessAt ? new Date(previous.lastSuccessAt) : undefined;
+    const result = { comments: await syncComments(g, { missedSince }), taggedPosts: await syncTaggedPosts(g) };
+    const commentsMissedByWebhook = reason === 'scheduled' ? (result.comments?.missedByWebhook ?? 0) : (previous?.commentsMissedByWebhook ?? 0);
+    const webhooks = { messages: await getWebhookFields().then(f => f.includes('messages')).catch(() => null), checkedAt: now };
     await setSetting(statusKey(g.id), {
       lastRunAt: now,
       lastSuccessAt: now,
       lastError: null,
       lastReason: reason,
       lastResult: result,
+      webhooks,
+      commentsMissedByWebhook,
     } satisfies SyncStatus);
     console.log(`Instagram sync (${reason}) for "${g.name}":`, JSON.stringify(result));
     return result;
@@ -48,6 +60,8 @@ export async function runCommentSync(g: Giveaway, reason: 'scheduled' | 'post-se
       lastError: message,
       lastReason: reason,
       lastResult: null,
+      ...(previous?.webhooks ? { webhooks: previous.webhooks } : {}),
+      commentsMissedByWebhook: previous?.commentsMissedByWebhook ?? 0,
     } satisfies SyncStatus);
     return null;
   }
