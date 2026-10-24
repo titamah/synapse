@@ -12,5 +12,5 @@ tmp="$(mktemp)"
 grep -v '^IG_ACCESS_TOKEN=' .env > "$tmp" || true
 printf 'IG_ACCESS_TOKEN=%s\n' "$token" >> "$tmp"
 cat "$tmp" > .env && rm -f "$tmp"
-docker compose up -d bot >/dev/null 2>&1
+docker compose up -d --force-recreate bot >/dev/null 2>&1
 echo "✅ Token saved and the bot restarted. Tell Claude so it can check Instagram."
